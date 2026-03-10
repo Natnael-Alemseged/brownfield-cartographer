@@ -20,3 +20,6 @@ build/
 
 # Cartographer outputs (optional: remove to track)
 # .cartography/
+
+#cursor
+.cursor/
