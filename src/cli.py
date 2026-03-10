@@ -16,6 +16,7 @@ if __name__ == "__main__":
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
 
+from src.cartographer.hydrologist import Hydrologist
 from src.cartographer.surveyor import Surveyor
 from src.tools.repo_tools import RepoSandbox, is_safe_url
 
@@ -81,17 +82,65 @@ def cmd_survey(input_path: str, output_dir: Path | None = None) -> int:
     return 0
 
 
+def cmd_lineage(input_path: str, output_dir: Path | None = None) -> int:
+    """
+    Run Hydrologist (lineage) on a local path or git URL.
+    Writes .cartography/lineage_graph.json and .cartography/lineage_summary.md.
+    """
+    _configure_survey_logging()
+    output_dir = output_dir or Path.cwd() / ".cartography"
+    hydrologist = Hydrologist(output_dir=output_dir)
+
+    if _is_git_url(input_path):
+        url = input_path.strip()
+        if not is_safe_url(url):
+            print("Error: URL not allowed (only https/git GitHub URLs).", file=sys.stderr)
+            return 1
+        try:
+            print(f"[CLI] Cloning {url} ...")
+            with RepoSandbox(url) as temp_path:
+                print(f"[CLI] Clone complete. Running lineage at {temp_path}")
+                json_path, summary_path = hydrologist.analyze_repository(temp_path, output_dir=output_dir)
+                print(f"[CLI] Lineage complete. Output: {json_path}, {summary_path}")
+        except (ValueError, RuntimeError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+    else:
+        path = Path(input_path.strip()).resolve()
+        if not path.exists():
+            print(f"Error: path does not exist: {path}", file=sys.stderr)
+            return 1
+        if not path.is_dir():
+            print("Error: lineage expects a directory (repo root) or a git URL.", file=sys.stderr)
+            return 1
+        try:
+            print(f"[CLI] Running lineage at {path}")
+            json_path, summary_path = hydrologist.analyze_repository(str(path), output_dir=output_dir)
+            print(f"[CLI] Lineage complete. Output: {json_path}, {summary_path}")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
 def main() -> int:
-    """Dispatch subcommands. Usage: python main.py survey <input>"""
+    """Dispatch subcommands. Usage: python main.py survey|lineage <input>"""
     args = sys.argv[1:]
-    if not args or args[0] != "survey":
+    if not args or args[0] not in ("survey", "lineage"):
         print("Usage: python main.py survey <path-or-git-url>", file=sys.stderr)
+        print("       python main.py lineage <path-or-git-url>", file=sys.stderr)
         print("  <path-or-git-url>: local directory or https://... / git@... repo URL", file=sys.stderr)
         return 2
     if len(args) < 2:
-        print("Error: survey requires an input path or URL.", file=sys.stderr)
+        print("Error: command requires an input path or URL.", file=sys.stderr)
         return 2
-    return cmd_survey(args[1])
+    cmd, input_path = args[0], args[1]
+    if cmd == "survey":
+        return cmd_survey(input_path)
+    if cmd == "lineage":
+        return cmd_lineage(input_path)
+    return 2
 
 
 if __name__ == "__main__":
