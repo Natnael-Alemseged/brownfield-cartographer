@@ -63,7 +63,7 @@ class RepoSandbox:
             print("Cleaned up git sandbox")
             
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # We allow manual cleanup now
+        self.cleanup()
         return False
 
 def extract_git_history(repo_path: str) -> str:
