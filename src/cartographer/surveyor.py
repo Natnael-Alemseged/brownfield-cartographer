@@ -7,6 +7,7 @@ PageRank, SCC, and dead-code candidate detection. Writes .cartography/module_gra
 
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -20,10 +21,14 @@ from src.models import ClassInfo, FunctionInfo, ModuleNode
 logger = logging.getLogger(__name__)
 
 # Default extensions we consider as "modules" for the graph
-MODULE_EXTENSIONS = {".py", ".sql", ".yaml", ".yml"}
+MODULE_EXTENSIONS = {".py", ".sql", ".yaml", ".yml", ".js", ".jsx", ".ts", ".tsx"}
 
 # Directories to skip when walking repo (same as common ignore patterns)
 SKIP_DIRS = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".mypy_cache", ".ruff_cache"}
+
+# Entry points: exclude from dead-code candidate when in_degree == 0
+ENTRY_POINT_NAMES = {"main.py", "app.py", "__main__.py"}
+ENTRY_POINT_SUBSTR = "dag"
 
 
 def _resolve_python_relative_import(
@@ -134,10 +139,13 @@ def _collect_python_functions_and_classes(source_bytes: bytes, tree) -> tuple[li
                             c = arg_list.child(i)
                             if c.type == "identifier":
                                 bases.append(_get_node_text(source_bytes, c))
+                    # parent_classes = full inheritance chain (here we only have direct bases)
+                    parent_classes = list(bases)
                     if not name.startswith("_"):
                         classes.append(ClassInfo(
                             name=name,
                             bases=bases,
+                            parent_classes=parent_classes,
                             line_start=node.start_point[0] + 1,
                             line_end=node.end_point[0] + 1,
                         ))
@@ -147,6 +155,69 @@ def _collect_python_functions_and_classes(source_bytes: bytes, tree) -> tuple[li
     except Exception as e:
         logger.warning("Error collecting functions/classes: %s", e)
     return functions, classes
+
+
+def _cyclomatic_python(source_bytes: bytes, tree) -> int:
+    """Count decision points in Python AST for cyclomatic complexity."""
+    from tree_sitter import Node
+    count = 0
+    decision_types = {
+        "if_statement", "elif_clause", "else_clause",
+        "for_statement", "while_statement",
+        "conditional_expression",
+        "and_operator", "or_operator",
+        "try_statement", "except_clause",
+        "match_statement", "case_clause",
+    }
+    def walk(node: Node) -> None:
+        nonlocal count
+        if node.type in decision_types:
+            count += 1
+        for i in range(node.child_count):
+            walk(node.child(i))
+    walk(tree.root_node)
+    return max(0, count)
+
+
+def _collect_cross_language_refs(
+    source_bytes: bytes, rel_path: str, path_to_node: dict[str, ModuleNode]
+) -> list[tuple[str, str]]:
+    """
+    Detect SQL/YAML references in Python or JS source (e.g. open('query.sql'), dbt.ref()).
+    Returns list of (target_path, edge_type) where edge_type is REFERENCES_SQL or REFERENCES_CONFIG.
+    """
+    results: list[tuple[str, str]] = []
+    try:
+        source = source_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return results
+    # String literals: '...sql', "...sql", '...yaml', "...yml", etc.
+    for m in re.finditer(r"""['"]([^'"]*\.(?:sql|yaml|yml))['"]""", source, re.IGNORECASE):
+        candidate = m.group(1).replace("\\", "/").lstrip("/")
+        # Resolve relative to current file's directory
+        base = str(Path(rel_path).parent) if Path(rel_path).parent != Path(".") else ""
+        if base:
+            resolved = (Path(base) / candidate).as_posix()
+        else:
+            resolved = candidate
+        if resolved in path_to_node:
+            ext = Path(resolved).suffix.lower()
+            edge_type = "REFERENCES_SQL" if ext == ".sql" else "REFERENCES_CONFIG"
+            results.append((resolved, edge_type))
+        else:
+            # Try candidate as-is
+            if candidate in path_to_node:
+                ext = Path(candidate).suffix.lower()
+                edge_type = "REFERENCES_SQL" if ext == ".sql" else "REFERENCES_CONFIG"
+                results.append((candidate, edge_type))
+    # dbt.ref('model_name') or ref('model_name') -> look for models/<name>.sql
+    for m in re.finditer(r"(?:dbt\.)?ref\s*\(\s*['\"]([^'\"]+)['\"]", source):
+        name = m.group(1).strip()
+        for p in path_to_node:
+            if p.endswith(f"{name}.sql") or p.endswith(f"/{name}.sql"):
+                results.append((p, "REFERENCES_SQL"))
+                break
+    return results
 
 
 def _analyze_python_file(
@@ -166,8 +237,8 @@ def _analyze_python_file(
     lines = source_bytes.count(b"\n") + (1 if source_bytes else 0)
     comment_lines = source_bytes.count(b"\n#") + (1 if source_bytes.strip().startswith(b"#") else 0)
     comment_ratio = comment_lines / lines if lines else 0.0
-    # Simple complexity: LOC-based
-    complexity = float(lines)
+    cyclomatic = _cyclomatic_python(source_bytes, tree)
+    complexity = float(lines) + cyclomatic  # combine LOC and cyclomatic
     return ModuleNode(
         path=rel_path,
         language="python",
@@ -176,6 +247,7 @@ def _analyze_python_file(
         classes=classes,
         lines_of_code=lines,
         comment_ratio=comment_ratio,
+        cyclomatic_complexity=cyclomatic,
         complexity_score=complexity,
     )
 
@@ -184,18 +256,26 @@ def _analyze_generic_file(
     file_path: Path, repo_root: Path, rel_path: str, source_bytes: bytes,
     language_router: LanguageRouter, parser
 ) -> Optional[ModuleNode]:
-    """Build minimal ModuleNode for SQL/YAML (no import extraction for now)."""
+    """Build minimal ModuleNode for SQL/YAML/JS/TS (no import extraction for now)."""
     lang = language_router.get_language(rel_path)
     if lang is None:
         return None
     lines = source_bytes.count(b"\n") + (1 if source_bytes else 0)
     ext = Path(rel_path).suffix.lower()
-    language = "yaml" if ext in (".yaml", ".yml") else "sql"
+    if ext in (".yaml", ".yml"):
+        language = "yaml"
+    elif ext in (".js", ".jsx"):
+        language = "javascript"
+    elif ext in (".ts", ".tsx"):
+        language = "typescript"
+    else:
+        language = "sql"
     return ModuleNode(
         path=rel_path,
         language=language,
         lines_of_code=lines,
         complexity_score=float(lines),
+        cyclomatic_complexity=0,
     )
 
 
@@ -208,6 +288,7 @@ class Surveyor:
     def __init__(self, output_dir: Optional[Path] = None) -> None:
         self.output_dir = Path(output_dir) if output_dir else Path(".cartography")
         self._language_router = LanguageRouter()
+        self._git_velocity_cache: dict[tuple[str, int], tuple[dict[str, int], set[str]]] = {}
 
     def analyze_module(self, path: str) -> Optional[ModuleNode]:
         """
@@ -342,7 +423,23 @@ class Surveyor:
                         target = candidate
                     else:
                         continue
-                G.add_edge(rel_str, target)
+                G.add_edge(rel_str, target, edge_type="IMPORTS")
+
+        # Cross-language edges: REFERENCES_SQL, REFERENCES_CONFIG (from Python/JS/TS)
+        code_extensions = {".py", ".js", ".jsx", ".ts", ".tsx"}
+        for rel_str in path_to_node:
+            if Path(rel_str).suffix.lower() not in code_extensions:
+                continue
+            full = repo / rel_str
+            if not full.is_file():
+                continue
+            try:
+                source_bytes = full.read_bytes()
+            except Exception:
+                continue
+            for target_path, edge_type in _collect_cross_language_refs(source_bytes, rel_str, path_to_node):
+                if G.has_node(target_path) and target_path != rel_str:
+                    G.add_edge(rel_str, target_path, edge_type=edge_type)
 
         # PageRank
         if G.number_of_nodes() > 0:
@@ -359,16 +456,31 @@ class Surveyor:
                     G.nodes[n]["scc_id"] = i
                     G.nodes[n]["scc_size"] = len(comp)
 
-        # Dead-code candidates: nodes with public exports but zero inbound edges
+        # Dead-code candidates: in_degree == 0 excluding entry points (main.py, app.py, DAGs)
+        def _is_entry_point(path_str: str) -> bool:
+            path_lower = path_str.lower()
+            if path_str.endswith("/main.py") or path_str == "main.py":
+                return True
+            if path_str.endswith("/app.py") or path_str == "app.py":
+                return True
+            if path_str.endswith("/__main__.py") or path_str == "__main__.py":
+                return True
+            if ENTRY_POINT_SUBSTR in path_lower:
+                return True
+            return False
+
         for rel_str, node in path_to_node.items():
             in_degree = G.in_degree(rel_str)
             has_exports = bool(node.public_functions or node.classes) or rel_str.endswith(".py")
-            if has_exports and in_degree == 0 and "setup.py" not in rel_str and "setup.py" != rel_str:
+            if has_exports and in_degree == 0 and not _is_entry_point(rel_str):
                 node.is_dead_code_candidate = True
             G.nodes[rel_str]["module_node"] = node.model_dump(mode="json")
 
-        # Git velocity (do not overwrite is_dead_code_candidate with high_churn)
-        velocity, high_churn = self.extract_git_velocity(repo_path, 30)
+        # Git velocity (run once per repo, cached)
+        cache_key = (repo_path, 30)
+        if cache_key not in self._git_velocity_cache:
+            self._git_velocity_cache[cache_key] = self.extract_git_velocity(repo_path, 30)
+        velocity, high_churn = self._git_velocity_cache[cache_key]
         for rel_str in path_to_node:
             path_to_node[rel_str].change_velocity_30d = velocity.get(rel_str, 0)
             if G.has_node(rel_str):
