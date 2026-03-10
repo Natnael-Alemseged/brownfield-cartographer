@@ -47,3 +47,35 @@ class ModuleNode(BaseModel):
     lines_of_code: int = 0
     comment_ratio: float = 0.0
     cyclomatic_complexity: int = Field(default=0, ge=0, description="Decision points (if/else/loop/etc.)")
+
+
+class DatasetNode(BaseModel):
+    """Node representing a dataset (table, file, stream, API) in the lineage graph."""
+
+    name: str = Field(description="Dataset identifier (table name, path, or stream name)")
+    storage_type: str = Field(
+        default="table",
+        description="One of: table | file | stream | api",
+    )
+    schema_snapshot: Optional[str] = Field(default=None, description="Optional schema description")
+    freshness_sla: Optional[str] = Field(default=None)
+    owner: Optional[str] = Field(default=None)
+    is_source_of_truth: bool = Field(default=False)
+
+
+class TransformationNode(BaseModel):
+    """Node representing a transformation (code/SQL/config) in the lineage graph."""
+
+    source_datasets: list[str] = Field(default_factory=list, description="Upstream dataset names")
+    target_datasets: list[str] = Field(default_factory=list, description="Downstream dataset names")
+    transformation_type: str = Field(
+        default="code",
+        description="e.g. code | sql | config_defined | notebook",
+    )
+    source_file: str = Field(default="", description="Relative path to source file")
+    line_range: tuple[int, int] = Field(default=(0, 0), description="(line_start, line_end)")
+    sql_query_if_applicable: Optional[str] = Field(default=None)
+    notebook_cell: Optional[dict] = Field(
+        default=None,
+        description="If from notebook: {cell_index, cell_type}",
+    )
