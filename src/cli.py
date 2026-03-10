@@ -5,6 +5,7 @@ Commands:
   survey <input>  Run Surveyor on a local path or git URL (clones to temp, analyzes, writes .cartography/)
 """
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -21,6 +22,17 @@ from src.tools.repo_tools import RepoSandbox, is_safe_url
 GIT_URL_PATTERN = re.compile(r"^(https?://|git@)")
 
 
+def _configure_survey_logging() -> None:
+    """Configure detailed logging to terminal for survey runs."""
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if not any(getattr(h, "stream", None) and getattr(h.stream, "name", "") == "<stdout>" for h in root.handlers):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+        root.addHandler(handler)
+
+
 def _is_git_url(input_str: str) -> bool:
     """True if input looks like a git URL (https, http, or git@)."""
     return bool(GIT_URL_PATTERN.match(input_str.strip()))
@@ -32,6 +44,7 @@ def cmd_survey(input_path: str, output_dir: Path | None = None) -> int:
     If URL: clone to temp dir, analyze, write to output_dir (default .cartography), cleanup.
     If local path: analyze in place, write to output_dir.
     """
+    _configure_survey_logging()
     output_dir = output_dir or Path.cwd() / ".cartography"
     surveyor = Surveyor(output_dir=output_dir)
 
@@ -41,9 +54,11 @@ def cmd_survey(input_path: str, output_dir: Path | None = None) -> int:
             print("Error: URL not allowed (only https/git GitHub URLs).", file=sys.stderr)
             return 1
         try:
+            print(f"[CLI] Cloning {url} ...")
             with RepoSandbox(url) as temp_path:
+                print(f"[CLI] Clone complete. Analyzing repository at {temp_path}")
                 out_file = surveyor.analyze_repository(temp_path, output_dir=output_dir)
-                print(f"Survey complete. Output: {out_file}")
+                print(f"[CLI] Survey complete. Output: {out_file}")
         except (ValueError, RuntimeError) as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
@@ -56,8 +71,9 @@ def cmd_survey(input_path: str, output_dir: Path | None = None) -> int:
             print("Error: survey expects a directory (repo root) or a git URL.", file=sys.stderr)
             return 1
         try:
+            print(f"[CLI] Analyzing repository at {path}")
             out_file = surveyor.analyze_repository(str(path), output_dir=output_dir)
-            print(f"Survey complete. Output: {out_file}")
+            print(f"[CLI] Survey complete. Output: {out_file}")
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1

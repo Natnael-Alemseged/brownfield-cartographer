@@ -17,6 +17,7 @@ from networkx.readwrite import json_graph
 
 from src.cartographer.core.language_router import LanguageRouter
 from src.models import ClassInfo, FunctionInfo, ModuleNode
+from src.tools.repo_tools import analyze_git_progression, extract_git_history
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +374,7 @@ class Surveyor:
         repo = Path(repo_path)
         if not repo.is_dir():
             return nx.DiGraph()
+        logger.info("Building module graph for repository at %s", repo)
         G = nx.DiGraph()
         path_to_node: dict[str, ModuleNode] = {}
         # Collect all relevant files
@@ -411,7 +413,9 @@ class Surveyor:
                     path_to_node[rel_str] = node
                     G.add_node(rel_str, module_node=node.model_dump(mode="json"))
 
+        logger.info("Found %d modules (nodes)", len(path_to_node))
         # Edges: imports (only Python imports for now)
+        import_edge_count = 0
         for rel_str, node in path_to_node.items():
             for imp in node.imports:
                 # imp might be "foo.bar" or "foo"; we store edges to same-repo modules
@@ -424,8 +428,11 @@ class Surveyor:
                     else:
                         continue
                 G.add_edge(rel_str, target, edge_type="IMPORTS")
+                import_edge_count += 1
+        logger.info("Added %d IMPORTS edges", import_edge_count)
 
         # Cross-language edges: REFERENCES_SQL, REFERENCES_CONFIG (from Python/JS/TS)
+        ref_edge_count = 0
         code_extensions = {".py", ".js", ".jsx", ".ts", ".tsx"}
         for rel_str in path_to_node:
             if Path(rel_str).suffix.lower() not in code_extensions:
@@ -440,6 +447,8 @@ class Surveyor:
             for target_path, edge_type in _collect_cross_language_refs(source_bytes, rel_str, path_to_node):
                 if G.has_node(target_path) and target_path != rel_str:
                     G.add_edge(rel_str, target_path, edge_type=edge_type)
+                    ref_edge_count += 1
+        logger.info("Added %d cross-language REFERENCES_SQL/REFERENCES_CONFIG edges", ref_edge_count)
 
         # PageRank
         if G.number_of_nodes() > 0:
@@ -447,6 +456,7 @@ class Surveyor:
             for n, v in pr.items():
                 if G.has_node(n):
                     G.nodes[n]["pagerank"] = v
+            logger.info("Computed PageRank for %d nodes", G.number_of_nodes())
 
         # SCC (strongly connected components)
         sccs = list(nx.strongly_connected_components(G))
@@ -455,6 +465,7 @@ class Surveyor:
                 if G.has_node(n):
                     G.nodes[n]["scc_id"] = i
                     G.nodes[n]["scc_size"] = len(comp)
+        logger.info("Found %d strongly connected component(s)", len(sccs))
 
         # Dead-code candidates: in_degree == 0 excluding entry points (main.py, app.py, DAGs)
         def _is_entry_point(path_str: str) -> bool:
@@ -475,12 +486,15 @@ class Surveyor:
             if has_exports and in_degree == 0 and not _is_entry_point(rel_str):
                 node.is_dead_code_candidate = True
             G.nodes[rel_str]["module_node"] = node.model_dump(mode="json")
+        dead_count = sum(1 for n in path_to_node.values() if n.is_dead_code_candidate)
+        logger.info("Marked %d dead-code candidate(s) (in_degree=0, excluding entry points)", dead_count)
 
         # Git velocity (run once per repo, cached)
         cache_key = (repo_path, 30)
         if cache_key not in self._git_velocity_cache:
             self._git_velocity_cache[cache_key] = self.extract_git_velocity(repo_path, 30)
         velocity, high_churn = self._git_velocity_cache[cache_key]
+        logger.info("Computed git velocity: %d file(s) changed in last 30 days (cached)", len(velocity))
         for rel_str in path_to_node:
             path_to_node[rel_str].change_velocity_30d = velocity.get(rel_str, 0)
             if G.has_node(rel_str):
@@ -497,12 +511,33 @@ class Surveyor:
         """
         out = Path(output_dir) if output_dir else self.output_dir
         out.mkdir(parents=True, exist_ok=True)
+        logger.info("Output directory: %s", out)
         G = self.build_module_graph(repo_path)
         # Serialize for JSON: use node-link format; module_node is a dict (Pydantic model_dump)
         data = json_graph.node_link_data(G)
         out_file = out / "module_graph.json"
         import json
+        logger.info("Writing %s ...", out_file)
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         logger.info("Wrote %s", out_file)
+
+        # Git commit history and progression analysis (from repo_tools)
+        try:
+            logger.info("Extracting git commit history ...")
+            history_text = extract_git_history(repo_path)
+            if history_text and not history_text.strip().startswith("Error"):
+                history_file = out / "git_history.txt"
+                history_file.write_text(history_text, encoding="utf-8")
+                logger.info("Wrote %s (%d commit lines)", history_file, len(history_text.strip().splitlines()))
+                logger.info("Analyzing git progression (atomic commits, phases, conventional commits) ...")
+                progression = analyze_git_progression(history_text)
+                progression_file = out / "git_progression.txt"
+                progression_file.write_text(progression, encoding="utf-8")
+                logger.info("Wrote %s", progression_file)
+            else:
+                logger.warning("No git history extracted (not a git repo or error): %s", (history_text or "")[:200])
+        except Exception as e:
+            logger.warning("Git history/progression analysis failed: %s", e)
+
         return out_file
