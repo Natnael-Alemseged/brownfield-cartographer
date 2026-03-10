@@ -66,6 +66,30 @@ class RepoSandbox:
         self.cleanup()
         return False
 
+
+def clone_to_temp(repo_url: str) -> str:
+    """
+    Clone a repository to a temporary directory and return its path.
+    For auto-cleanup, use RepoSandbox(repo_url) as path: ... instead.
+    Caller is responsible for removing the directory when done (e.g. shutil.rmtree).
+    """
+    if not is_safe_url(repo_url):
+        raise ValueError(f"Insecure or invalid repository URL: {repo_url}")
+    temp_dir = tempfile.mkdtemp(prefix="cartographer_clone_")
+    result = subprocess.run(
+        ["git", "clone", repo_url, "."],
+        cwd=temp_dir,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError(f"Git clone failed: {result.stderr}")
+    return temp_dir
+
+
 def extract_git_history(repo_path: str) -> str:
     """Extract commit history from the cloned repository using rubric format."""
     try:
