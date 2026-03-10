@@ -16,10 +16,14 @@ class FunctionInfo(BaseModel):
 
 
 class ClassInfo(BaseModel):
-    """Class definition with optional inheritance."""
+    """Class definition with inheritance chain."""
 
     name: str
-    bases: list[str] = Field(default_factory=list)
+    bases: list[str] = Field(default_factory=list, description="Direct base class names")
+    parent_classes: list[str] = Field(
+        default_factory=list,
+        description="Full inheritance chain (ordered list of base names)",
+    )
     line_start: int = 0
     line_end: int = 0
 
@@ -42,3 +46,4 @@ class ModuleNode(BaseModel):
     classes: list[ClassInfo] = Field(default_factory=list)
     lines_of_code: int = 0
     comment_ratio: float = 0.0
+    cyclomatic_complexity: int = Field(default=0, ge=0, description="Decision points (if/else/loop/etc.)")
