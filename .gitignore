@@ -17,3 +17,6 @@ build/
 
 # UV
 .uv/
+
+# Cartographer outputs (optional: remove to track)
+# .cartography/
