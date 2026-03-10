@@ -14,11 +14,16 @@ from tree_sitter import Language
 logger = logging.getLogger(__name__)
 
 # Extension -> (package_import_name, language_getter_name)
+# JS/TS: tree-sitter-javascript has language(); tree-sitter-typescript has language() and language_tsx()
 _EXTENSION_MAP = {
     ".py": ("tree_sitter_python", "language"),
     ".sql": ("tree_sitter_sql", "language"),
     ".yaml": ("tree_sitter_yaml", "language"),
     ".yml": ("tree_sitter_yaml", "language"),
+    ".js": ("tree_sitter_javascript", "language"),
+    ".jsx": ("tree_sitter_javascript", "language"),
+    ".ts": ("tree_sitter_typescript", "language_typescript"),
+    ".tsx": ("tree_sitter_typescript", "language_tsx"),
 }
 
 
