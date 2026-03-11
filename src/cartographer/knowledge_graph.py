@@ -76,15 +76,30 @@ class LineageGraph:
 
         return tid
 
-    def blast_radius(self, node_name: str, direction: str = "downstream") -> list[str]:
+    def blast_radius(self, node_name: str, direction: str = "downstream") -> dict[str, list[str]]:
         """
-        Return all nodes affected in the given direction (downstream or upstream).
+        Return all affected nodes and their shortest paths from/to node_name.
+
+        direction="downstream": paths from node_name -> target (data consumers).
+        direction="upstream": paths from source -> node_name (data producers).
         """
         if node_name not in self._G:
-            return []
+            return {}
         if direction == "downstream":
-            return list(nx.descendants(self._G, node_name))
-        return list(nx.ancestors(self._G, node_name))
+            targets = nx.descendants(self._G, node_name)
+        else:
+            targets = nx.ancestors(self._G, node_name)
+        paths: dict[str, list[str]] = {}
+        for t in targets:
+            try:
+                if direction == "downstream":
+                    path = nx.shortest_path(self._G, node_name, t)
+                else:
+                    path = nx.shortest_path(self._G, t, node_name)
+            except Exception:
+                continue
+            paths[t] = path
+        return paths
 
     def find_sources(self) -> list[str]:
         """Nodes with in_degree 0 (entry points)."""
