@@ -88,50 +88,45 @@ def python_data_flow_analyzer(
     except Exception as e:
         logger.warning("PythonDataFlow: parse failed %s: %s", rel_path, e)
         return []
-    # (object_name_fragment, method_name)
     read_patterns = [
         ("pd", "read_csv"), ("pandas", "read_csv"), ("pd", "read_sql"), ("pandas", "read_sql"),
         ("spark", "read"), ("df", "read"), ("session", "execute"), ("engine", "execute"),
-        ("conn", "execute"), ("connection", "execute"), ("text", ""),
+        ("conn", "execute"), ("connection", "execute"),
     ]
     write_patterns = [
         ("df", "to_csv"), ("df", "to_sql"), ("df", "write"), ("table", "to_sql"),
         ("spark", "write"), ("session", "execute"),
     ]
-    # Simpler: regex for read_csv("..."), to_sql("..."), execute("..."), etc.
     nodes = []
     try:
-        for m in re.finditer(r"(?:read_csv|read_sql|to_csv|to_sql|\.write\s*\.)\s*\(\s*['\"]([^'\"]+)['\"]", source_bytes.decode("utf-8", errors="replace")):
-            path_or_table = m.group(1).strip()
-            if path_or_table.startswith("f") or "{" in path_or_table:
-                logger.warning("PythonDataFlow: dynamic_reference in %s (f-string/variable)", rel_path)
+        # 1. Static AST analysis (tree-sitter)
+        reads = _collect_string_args_python(source_bytes, tree, read_patterns)
+        for (dataset, kind, start, end) in reads:
+            if dataset == "dynamic_reference":
+                logger.warning("PythonDataFlow: dynamic_reference in %s (line %d)", rel_path, start)
                 continue
-            if "read" in m.group(0).lower():
-                nodes.append(TransformationNode(
-                    source_datasets=[path_or_table],
-                    target_datasets=[],
-                    transformation_type="code",
-                    source_file=rel_path,
-                    line_range=(0, 0),
-                ))
-            else:
-                nodes.append(TransformationNode(
-                    source_datasets=[],
-                    target_datasets=[path_or_table],
-                    transformation_type="code",
-                    source_file=rel_path,
-                    line_range=(0, 0),
-                ))
-        for m in re.finditer(r"execute\s*\(\s*['\"]([^'\"]+)['\"]", source_bytes.decode("utf-8", errors="replace")):
-            sql_ref = m.group(1).strip()[:200]
             nodes.append(TransformationNode(
-                source_datasets=[],
+                source_datasets=[dataset],
                 target_datasets=[],
                 transformation_type="code",
                 source_file=rel_path,
-                line_range=(0, 0),
-                sql_query_if_applicable=sql_ref,
+                line_range=(start, end),
             ))
+        
+        writes = _collect_string_args_python(source_bytes, tree, write_patterns)
+        for (dataset, kind, start, end) in writes:
+            if dataset == "dynamic_reference":
+                continue
+            nodes.append(TransformationNode(
+                source_datasets=[],
+                target_datasets=[dataset],
+                transformation_type="code",
+                source_file=rel_path,
+                line_range=(start, end),
+            ))
+
+        # 2. Add fallback for execute() with raw SQL string literals if not captured by tree-sitter
+        # (Already handled by reads pattern "session.execute" etc. above if it matches call structure)
     except Exception as e:
         logger.warning("PythonDataFlow: %s: %s", rel_path, e)
     return nodes
@@ -293,8 +288,6 @@ class Hydrologist:
                 ext = Path(rel_str).suffix.lower()
                 if ext == ".py":
                     for t in python_data_flow_analyzer(repo, rel_str, source_bytes, self._language_router):
-                        self._lineage.add_transformation(t)
-                    for t in dag_config_analyzer(repo, rel_str, source_bytes, self._language_router):
                         self._lineage.add_transformation(t)
                 elif ext in (".sql", ".sqlx"):
                     for t in sql_lineage_analyzer(repo, rel_str, source_bytes):
