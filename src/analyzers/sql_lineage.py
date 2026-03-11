@@ -96,6 +96,19 @@ def extract_sql_lineage(
         if insert.this:
             tables_out.append(insert.this.name)
 
+    # Filter out CTE aliases so internal CTE names are not treated as external datasets
+    cte_aliases: set[str] = set()
+    try:
+        for cte in parsed.find_all(sqlglot.exp.CTE):
+            alias = getattr(cte, "alias", None)
+            name = getattr(alias, "name", None) if alias is not None else None
+            if isinstance(name, str):
+                cte_aliases.add(name)
+    except Exception:
+        # Best-effort; if CTE traversal fails, fall back to unfiltered tables_in
+        cte_aliases = set()
+    tables_in = [t for t in tables_in if t not in cte_aliases]
+
     if not tables_out and rel_path:
         tables_out = [Path(rel_path).stem]
 
