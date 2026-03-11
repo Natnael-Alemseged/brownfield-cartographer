@@ -1,5 +1,6 @@
 """
 Lineage knowledge graph: datasets, transformations, PRODUCES/CONSUMES edges.
+Module graph storage: ModuleNode-based graph with typed edges and JSON ser/deser.
 
 Integrates with Phase 1 module graph; adds DatasetNode and TransformationNode layers.
 """
@@ -12,13 +13,9 @@ from typing import Optional
 import networkx as nx
 from networkx.readwrite import json_graph
 
-from src.models import DatasetNode, TransformationNode
+from src.models import DatasetNode, EdgeType, ModuleNode, TransformationNode
 
 logger = logging.getLogger(__name__)
-
-# Edge types for lineage
-PRODUCES = "PRODUCES"  # transformation -> dataset
-CONSUMES = "CONSUMES"  # dataset -> transformation
 
 
 class LineageGraph:
@@ -60,10 +57,22 @@ class LineageGraph:
 
         for src in t.source_datasets:
             self.add_dataset(src)
-            self._G.add_edge(src, tid, edge_type=CONSUMES)
+            self._G.add_edge(
+                src, tid,
+                edge_type=EdgeType.CONSUMES.value,
+                transformation_type=t.transformation_type,
+                source_file=t.source_file,
+                line_range=t.line_range,
+            )
         for tgt in t.target_datasets:
             self.add_dataset(tgt)
-            self._G.add_edge(tid, tgt, edge_type=PRODUCES)
+            self._G.add_edge(
+                tid, tgt,
+                edge_type=EdgeType.PRODUCES.value,
+                transformation_type=t.transformation_type,
+                source_file=t.source_file,
+                line_range=t.line_range,
+            )
 
         return tid
 
@@ -124,6 +133,70 @@ class LineageGraph:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, indent=2)
         logger.info("Wrote %s", path)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "LineageGraph":
+        """Deserialize lineage graph from JSON (node_link_data format). Returns a new LineageGraph."""
+        path = Path(path)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        G = json_graph.node_link_graph(data)
+        inst = cls()
+        inst._G = G
+        # Rebuild _datasets and _transformations from node attributes for API consistency
+        for n, attrs in G.nodes(data=True):
+            if attrs.get("node_type") == "dataset":
+                inst._datasets[n] = dict(attrs)
+            elif attrs.get("node_type") == "transformation":
+                inst._transformations[n] = dict(attrs)
+        return inst
+
+    @property
+    def graph(self) -> nx.DiGraph:
+        return self._G
+
+
+class ModuleGraphStorage:
+    """
+    Shared storage for the module import graph. Wraps NetworkX with typed methods
+    for adding ModuleNodes and edges (EdgeType), with JSON serialization and deserialization.
+    Multiple agents can write to and read from this layer.
+    """
+
+    def __init__(self) -> None:
+        self._G = nx.DiGraph()
+
+    def add_module_node(self, node: ModuleNode) -> None:
+        """Add or update a module node. Enforces alignment with ModuleNode schema."""
+        attrs = node.model_dump(mode="json")
+        self._G.add_node(node.path, node_type="module", module_node=attrs)
+
+    def add_edge(self, u: str, v: str, edge_type: EdgeType) -> None:
+        """Add a typed edge between module nodes."""
+        self._G.add_edge(u, v, edge_type=edge_type.value)
+
+    def to_dict(self) -> dict:
+        """Serialize graph to node_link_data format for JSON."""
+        return json_graph.node_link_data(self._G)
+
+    def write_json(self, path: Path) -> None:
+        """Write module graph to JSON."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.info("Wrote %s", path)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ModuleGraphStorage":
+        """Deserialize module graph from JSON. Returns a new ModuleGraphStorage."""
+        path = Path(path)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        G = json_graph.node_link_graph(data)
+        inst = cls()
+        inst._G = G
+        return inst
 
     @property
     def graph(self) -> nx.DiGraph:
