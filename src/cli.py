@@ -1,10 +1,13 @@
 """
 CLI entry point for Brownfield Cartographer.
 
-Commands:
-  survey <input>  Run Surveyor on a local path or git URL (clones to temp, analyzes, writes .cartography/)
+Commands (subset modes):
+  survey   — structure-only: module graph, PageRank, git velocity, dead-code (writes module_graph.json, survey_summary.md)
+  lineage  — lineage-only: data lineage from SQL/Python/dbt/notebooks (writes lineage_graph.json, lineage_summary.md)
+  analyze  — full pipeline: survey then lineage (all artifacts)
 """
 
+import argparse
 import logging
 import re
 import sys
@@ -24,13 +27,13 @@ from src.tools.repo_tools import RepoSandbox, is_safe_url
 GIT_URL_PATTERN = re.compile(r"^(https?://|git@)")
 
 
-def _configure_survey_logging() -> None:
-    """Configure detailed logging to terminal for survey runs."""
+def _configure_survey_logging(verbose: bool = False) -> None:
+    """Configure logging to terminal. If verbose, use DEBUG for more per-file detail."""
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG if verbose else logging.INFO)
     if not any(getattr(h, "stream", None) and getattr(h.stream, "name", "") == "<stdout>" for h in root.handlers):
         handler = logging.StreamHandler(sys.stdout)
-        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG if verbose else logging.INFO)
         handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
         root.addHandler(handler)
 
@@ -40,13 +43,12 @@ def _is_git_url(input_str: str) -> bool:
     return bool(GIT_URL_PATTERN.match(input_str.strip()))
 
 
-def cmd_survey(input_path: str, output_dir: Path | None = None) -> int:
+def cmd_survey(input_path: str, output_dir: Path | None = None, verbose: bool = False) -> int:
     """
-    Run Surveyor on a local path or git URL.
-    If URL: clone to temp dir, analyze, write to output_dir (default .cartography), cleanup.
-    If local path: analyze in place, write to output_dir.
+    Run Surveyor (structure-only): module graph, PageRank, git velocity, dead-code.
+    Writes module_graph.json and survey_summary.md.
     """
-    _configure_survey_logging()
+    _configure_survey_logging(verbose=verbose)
     output_dir = output_dir or Path.cwd() / ".cartography"
     surveyor = Surveyor(output_dir=output_dir)
 
@@ -56,9 +58,9 @@ def cmd_survey(input_path: str, output_dir: Path | None = None) -> int:
             print("Error: URL not allowed (only https/git GitHub URLs).", file=sys.stderr)
             return 1
         try:
-            print(f"[CLI] Cloning {url} ...")
+            print("[CLI] Cloning repository ...")
             with RepoSandbox(url) as temp_path:
-                print(f"[CLI] Clone complete. Analyzing repository at {temp_path}")
+                print(f"[CLI] Clone complete. Running survey (structure-only) at {temp_path}")
                 out_file = surveyor.analyze_repository(temp_path, output_dir=output_dir)
                 print(f"[CLI] Survey complete. Output: {out_file}")
         except (ValueError, RuntimeError) as e:
@@ -73,7 +75,7 @@ def cmd_survey(input_path: str, output_dir: Path | None = None) -> int:
             print("Error: survey expects a directory (repo root) or a git URL.", file=sys.stderr)
             return 1
         try:
-            print(f"[CLI] Analyzing repository at {path}")
+            print(f"[CLI] Running survey (structure-only) at {path}")
             out_file = surveyor.analyze_repository(str(path), output_dir=output_dir)
             print(f"[CLI] Survey complete. Output: {out_file}")
         except Exception as e:
@@ -83,12 +85,12 @@ def cmd_survey(input_path: str, output_dir: Path | None = None) -> int:
     return 0
 
 
-def cmd_lineage(input_path: str, output_dir: Path | None = None) -> int:
+def cmd_lineage(input_path: str, output_dir: Path | None = None, verbose: bool = False) -> int:
     """
-    Run Hydrologist (lineage) on a local path or git URL.
-    Writes .cartography/lineage_graph.json and .cartography/lineage_summary.md.
+    Run Hydrologist (lineage-only): SQL, Python, dbt, notebooks.
+    Writes lineage_graph.json and lineage_summary.md.
     """
-    _configure_survey_logging()
+    _configure_survey_logging(verbose=verbose)
     output_dir = output_dir or Path.cwd() / ".cartography"
     hydrologist = Hydrologist(output_dir=output_dir)
 
@@ -98,7 +100,7 @@ def cmd_lineage(input_path: str, output_dir: Path | None = None) -> int:
             print("Error: URL not allowed (only https/git GitHub URLs).", file=sys.stderr)
             return 1
         try:
-            print(f"[CLI] Cloning {url} ...")
+            print("[CLI] Cloning repository ...")
             with RepoSandbox(url) as temp_path:
                 print(f"[CLI] Clone complete. Running lineage at {temp_path}")
                 json_path, summary_path = hydrologist.analyze_repository(temp_path, output_dir=output_dir)
@@ -125,12 +127,11 @@ def cmd_lineage(input_path: str, output_dir: Path | None = None) -> int:
     return 0
 
 
-def cmd_analyze(input_path: str, output_dir: Path | None = None) -> int:
+def cmd_analyze(input_path: str, output_dir: Path | None = None, verbose: bool = False) -> int:
     """
-    Run full analysis: Surveyor then Hydrologist, write all artifacts to .cartography/.
-    (module_graph.json, lineage_graph.json, lineage_summary.md)
+    Run full pipeline: Surveyor then Hydrologist (all artifacts).
     """
-    _configure_survey_logging()
+    _configure_survey_logging(verbose=verbose)
     output_dir = output_dir or Path.cwd() / ".cartography"
     if _is_git_url(input_path):
         url = input_path.strip()
@@ -138,9 +139,9 @@ def cmd_analyze(input_path: str, output_dir: Path | None = None) -> int:
             print("Error: URL not allowed (only https/git GitHub URLs).", file=sys.stderr)
             return 1
         try:
-            print(f"[CLI] Cloning {url} ...")
+            print("[CLI] Cloning repository ...")
             with RepoSandbox(url) as temp_path:
-                print(f"[CLI] Running full analysis at {temp_path}")
+                print(f"[CLI] Clone complete. Running full analysis at {temp_path}")
                 mg, lg, ls = run_analysis(temp_path, output_dir=output_dir)
                 print(f"[CLI] Analysis complete. Outputs: {mg}, {lg}, {ls}")
         except (ValueError, RuntimeError) as e:
@@ -165,24 +166,24 @@ def cmd_analyze(input_path: str, output_dir: Path | None = None) -> int:
 
 
 def main() -> int:
-    """Dispatch subcommands. Usage: python main.py survey|lineage|analyze <input>"""
-    args = sys.argv[1:]
-    if not args or args[0] not in ("survey", "lineage", "analyze"):
-        print("Usage: python main.py survey <path-or-git-url>", file=sys.stderr)
-        print("       python main.py lineage <path-or-git-url>", file=sys.stderr)
-        print("       python main.py analyze <path-or-git-url>", file=sys.stderr)
-        print("  <path-or-git-url>: local directory or https://... / git@... repo URL", file=sys.stderr)
-        return 2
-    if len(args) < 2:
-        print("Error: command requires an input path or URL.", file=sys.stderr)
-        return 2
-    cmd, input_path = args[0], args[1]
-    if cmd == "survey":
-        return cmd_survey(input_path)
-    if cmd == "lineage":
-        return cmd_lineage(input_path)
-    if cmd == "analyze":
-        return cmd_analyze(input_path)
+    """Dispatch subcommands. Supports structure-only (survey), lineage-only (lineage), or full (analyze)."""
+    parser = argparse.ArgumentParser(
+        description="Brownfield Cartographer: codebase and data lineage analysis.",
+        epilog="Modes: survey=structure-only, lineage=lineage-only, analyze=full pipeline.",
+    )
+    parser.add_argument("command", choices=["survey", "lineage", "analyze"], help="survey | lineage | analyze")
+    parser.add_argument("input", help="Local directory or GitHub repo URL")
+    parser.add_argument("-o", "--output", type=Path, default=None, help="Output directory (default: .cartography)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Per-file / verbose logging")
+    args = parser.parse_args()
+    output_dir = args.output or Path.cwd() / ".cartography"
+
+    if args.command == "survey":
+        return cmd_survey(args.input, output_dir=output_dir, verbose=args.verbose)
+    if args.command == "lineage":
+        return cmd_lineage(args.input, output_dir=output_dir, verbose=args.verbose)
+    if args.command == "analyze":
+        return cmd_analyze(args.input, output_dir=output_dir, verbose=args.verbose)
     return 2
 
 
