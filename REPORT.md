@@ -70,7 +70,9 @@ flowchart TD
     subgraph Output ["Generated Artifacts"]
         CM["CODEBASE.md"]
         OB["onboarding_brief.md"]
-        LJ["lineage_graph.json"]
+        MGJ["module_graph.json"]
+        LGJ["lineage_graph.json"]
+        LSM["lineage_summary.md"]
     end
 
     Repo -->|Files| Surveyor
@@ -85,7 +87,9 @@ flowchart TD
     MG & LG & VS --> Archivist
     Archivist --> CM
     Archivist --> OB
-    Archivist --> LJ
+    Archivist --> MGJ
+    Archivist --> LGJ
+    Archivist --> LSM
 
     %% Data Flow Types
     linkStyle 1 stroke:#2ecc71,stroke-width:2px;
@@ -98,12 +102,14 @@ flowchart TD
 
 | Component       | Status          | Detail                                                                                                        |
 | --------------- | --------------- | ------------------------------------------------------------------------------------------------------------- |
-| **Surveyor**    | **Functional**  | Tree-sitter Python parsing works; import graph built; PageRank/SCC/Git Velocity functional.                   |
-| **Hydrologist** | **Functional**  | SQL multi-dialect parsing; dbt `ref`/`source` regex fallback; AST-based Python data flow (pandas/SQLAlchemy). |
-| **Analyzers**   | **Functional**  | SQL, Python, YAML, and Notebook (.ipynb) support implemented. Strictly scoped to prevent false nodes.         |
-| **Semanticist** | **In-Progress** | Token budget implemented; tiered LLM selection (Flash vs Pro) configured.                                     |
-| **Archivist**   | **Planned**     | Template system for `CODEBASE.md` and `onboarding_brief.md` in development.                                   |
-| **Navigator**   | **Planned**     | CLI query interface via LangGraph not yet started.                                                            |
+| **CLI**          | **Functional**  | [main.py](main.py) / [src/cli.py](src/cli.py): `survey`, `lineage`, `analyze` commands support local & git repos.    |
+| **Surveyor**     | **Functional**  | Tree-sitter Python parsing works; import graph built; PageRank/SCC/Git Velocity functional.                   |
+| **Hydrologist**  | **Functional**  | SQL multi-dialect parsing; dbt `ref`/`source` regex fallback; AST-based Python data flow (pandas/SQLAlchemy). |
+| **Analyzers**    | **Functional**  | SQL, Python, YAML, and Notebook (.ipynb) support implemented. Strictly scoped to prevent false nodes.         |
+| **Pydantic/KG**  | **Functional**  | Full schema defined in [src/models/schemas.py](src/models/schemas.py); Knowledge Graph serialization to JSON. |
+| **Semanticist**  | **In-Progress** | Token budget implemented; tiered LLM selection (Flash vs Pro) configured.                                     |
+| **Archivist**    | **Planned**     | Template system for `CODEBASE.md` and `onboarding_brief.md` in development.                                   |
+| **Navigator**    | **Planned**     | CLI query interface via LangGraph not yet started.                                                            |
 
 ---
 
@@ -119,6 +125,7 @@ Our system correctly extracted the **full 8-node DAG** for the jaffle shop.
   - All staging models correctly point back to their respective `raw_` seeds.
 - **Structural Success**: Despite `sqlglot` failing to parse the Jinja `{% set ... %}` in `orders.sql`, our **Regex Fallback** successfully captured the dependencies, ensuring the graph topology is 100% accurate.
 - **Improved Lineage**: We eliminated "false nodes" (regex patterns in string literals) by strictly scoping the `dag_config_analyzer` to YAML and using AST-based extraction for Python.
+- **Structural Constraints**: The module import graph for `jaffle-shop-classic` is correctly identified as empty/minimal (SQL/YAML only), which matches the target's polyglot nature (data engineering vs. application logic).
 
 ---
 
@@ -135,13 +142,17 @@ Our system correctly extracted the **full 8-node DAG** for the jaffle shop.
 - **Risk**: High LLM cost for large codebases. **Mitigation**: Using Gemini 1.5 Flash for bulk summaries and implementing a strict `ContextWindowBudget`.
 - **Risk**: Hallucinated business logic in Semanticist. **Mitigation**: Citing file/line evidence for every claim in the Onboarding Brief.
 
+### Fallback Strategy
+
+If time runs short: deprioritize the Navigator interface; ensure Semanticist and Archivist still deliver `CODEBASE.md` and `onboarding_brief.md` so the living context and Day-One brief are available for the final submission.
+
 ---
 
 ## 6. Submission Readiness (Rubric Self-Assessment)
 
 | Dimension          | Likely Score             | Justification                                                                                   |
 | ------------------ | ------------------------ | ----------------------------------------------------------------------------------------------- |
-| **Reconnaissance** | **Master Thinker (5/5)** | All 5 questions answered with specific file paths and mechanims (Jinja pivots, seed ingestion). |
+| **Reconnaissance** | **Master Thinker (5/5)** | All 5 questions answered with specific file paths and mechanisms (Jinja pivots, seed ingestion). |
 | **Architecture**   | **Master Thinker (5/5)** | High-fidelity mermaid diagram with labeled data flows and central KG.                           |
 | **Progress**       | **Master Thinker (5/5)** | Honest, sub-component level status including known limits of SQL parsing.                       |
 | **Accuracy**       | **Master Thinker (5/5)** | Grounded comparison to `jaffle-shop-classic` with specific correctly identified dependencies.   |
