@@ -1,18 +1,28 @@
 """
 Multi-language AST parsing with LanguageRouter (tree-sitter, no build_library).
 
-Analyzes a single file and returns imports (with optional relative resolution),
-function definitions with signatures and decorators, class definitions with inheritance,
-SQL table references and query structure, and YAML key hierarchies.
-Unparseable files are logged and skipped (returns None).
+Analyzes a single file and returns typed results per language (PythonAnalysisResult,
+SqlAnalysisResult, YamlAnalysisResult) or a generic dict. Handles star imports and
+dynamic import hints. Unparseable files are logged and skipped (returns None).
 """
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
 from src.cartographer.core.language_router import LanguageRouter
+from src.models import (
+    ClassDefResult,
+    FunctionDefResult,
+    KeyHierarchyEntry,
+    PythonAnalysisResult,
+    QueryStructureResult,
+    SqlAnalysisResult,
+    TableRefResult,
+    YamlAnalysisResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,15 +100,13 @@ def analyze_file(
     def get_text(node: Any) -> str:
         return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
 
-    # Python: imports (with resolution), functions with signatures/decorators, classes with bases
+    # Python: imports (with resolution), star/dynamic import handling, functions, classes
     if suffix == ".py":
-        result: dict[str, Any] = {
-            "path": rel_path,
-            "language": "python",
-            "imports": [],
-            "functions": [],
-            "classes": [],
-        }
+        imports: list[str] = []
+        star_imports: list[str] = []
+        dynamic_imports: list[str] = []
+        functions: list[dict[str, Any]] = []
+        classes: list[dict[str, Any]] = []
         try:
             from tree_sitter import Node
 
@@ -106,7 +114,7 @@ def analyze_file(
                 if node.type == "import_statement":
                     name_node = node.child_by_field_name("name")
                     if name_node:
-                        result["imports"].append(get_text(name_node).strip())
+                        imports.append(get_text(name_node).strip())
                 elif node.type == "import_from_statement":
                     mod_node = node.child_by_field_name("module_name")
                     rel_node = node.child_by_field_name("relative_import")
@@ -117,8 +125,11 @@ def analyze_file(
                     if rel_node:
                         mod = "." + mod if mod else "."
                     resolved = _resolve_python_relative_import(mod, repo_root, path)
-                    if resolved is not None:
-                        result["imports"].append(resolved)
+                    star_node = node.child_by_field_name("wildcard_import")
+                    if star_node is not None:
+                        star_imports.append(resolved if resolved is not None else mod)
+                    elif resolved is not None:
+                        imports.append(resolved)
                 elif node.type == "function_definition":
                     name_node = node.child_by_field_name("name")
                     if name_node:
@@ -131,7 +142,7 @@ def analyze_file(
                                 dec_inner = c.child_by_field_name("decorator")
                                 if dec_inner:
                                     decorators.append(get_text(dec_inner).strip())
-                        result["functions"].append({
+                        functions.append({
                             "name": name,
                             "signature": sig,
                             "line_start": node.start_point[0] + 1,
@@ -149,7 +160,7 @@ def analyze_file(
                                 c = superclasses.child(i)
                                 if c.type == "identifier":
                                     bases.append(get_text(c))
-                        result["classes"].append({
+                        classes.append({
                             "name": name,
                             "bases": bases,
                             "parent_classes": list(bases),
@@ -160,27 +171,41 @@ def analyze_file(
                     walk_py(node.child(i))
 
             walk_py(tree.root_node)
+            # Dynamic import hints: __import__(...) or importlib.import_module(...)
+            try:
+                source_str = source_bytes.decode("utf-8", errors="replace")
+                for m in re.finditer(r"(__import__|importlib\.import_module)\s*\(\s*['\"]([^'\"]+)['\"]", source_str):
+                    dynamic_imports.append(m.group(2).strip())
+            except Exception:
+                pass
         except Exception as e:
             logger.warning("tree_sitter_analyzer: Python walk failed %s: %s", path, e)
-        return result
+        out = PythonAnalysisResult(
+            path=rel_path,
+            language="python",
+            imports=imports,
+            star_imports=star_imports,
+            dynamic_imports=dynamic_imports,
+            functions=[FunctionDefResult(**f) for f in functions],
+            classes=[ClassDefResult(**c) for c in classes],
+        )
+        return out.model_dump(mode="json")
 
     # SQL: table references and query structure at AST level
     if suffix == ".sql":
-        result = {"path": rel_path, "language": "sql", "tables": [], "query_structures": []}
+        tables: list[dict[str, Any]] = []
+        query_structures: list[dict[str, Any]] = []
         try:
             from tree_sitter import Node
 
             def walk_sql(node: Node) -> None:
-                # tree-sitter-sql: table references appear as identifier or table names
                 if getattr(node, "type", None) == "identifier":
                     text = get_text(node).strip()
                     if text and text.lower() not in ("select", "from", "join", "where", "and", "or", "as", "on", "inner", "left", "right", "outer", "cross"):
-                        # Heuristic: could be table name in context
-                        result["tables"].append({"name": text, "line": node.start_point[0] + 1})
-                # Capture structure hints (select_statement, join_clause, etc.)
+                        tables.append({"name": text, "line": node.start_point[0] + 1})
                 t = getattr(node, "type", None)
-                if t and t.endswith("_statement") or t in ("join_clause", "with_clause", "table_expression"):
-                    result["query_structures"].append({
+                if t and (t.endswith("_statement") or t in ("join_clause", "with_clause", "table_expression")):
+                    query_structures.append({
                         "type": t,
                         "line_start": node.start_point[0] + 1,
                         "line_end": node.end_point[0] + 1,
@@ -189,14 +214,21 @@ def analyze_file(
                     walk_sql(node.child(i))
 
             walk_sql(tree.root_node)
-            result["tables"] = list({t["name"]: t for t in result["tables"]}.values())
+            tables = list({t["name"]: t for t in tables}.values())
         except Exception as e:
             logger.warning("tree_sitter_analyzer: SQL walk failed %s: %s", path, e)
-        return result
+        out = SqlAnalysisResult(
+            path=rel_path,
+            language="sql",
+            tables=[TableRefResult(**t) for t in tables],
+            query_structures=[QueryStructureResult(**q) for q in query_structures],
+        )
+        return out.model_dump(mode="json")
 
     # YAML: key hierarchies for pipeline config
     if suffix in (".yaml", ".yml"):
-        result = {"path": rel_path, "language": "yaml", "keys": [], "key_hierarchy": []}
+        keys: list[str] = []
+        key_hierarchy: list[dict[str, Any]] = []
         try:
             from tree_sitter import Node
 
@@ -207,8 +239,8 @@ def analyze_file(
                     if key_node:
                         key_text = get_text(key_node).strip().strip("'\"").strip()
                         full_key = f"{prefix}.{key_text}" if prefix else key_text
-                        result["keys"].append(full_key)
-                        result["key_hierarchy"].append({"key": full_key, "line": node.start_point[0] + 1})
+                        keys.append(full_key)
+                        key_hierarchy.append({"key": full_key, "line": node.start_point[0] + 1})
                         for i in range(node.child_count):
                             walk_yaml(node.child(i), full_key)
                         return
@@ -218,7 +250,13 @@ def analyze_file(
             walk_yaml(tree.root_node)
         except Exception as e:
             logger.warning("tree_sitter_analyzer: YAML walk failed %s: %s", path, e)
-        return result
+        out = YamlAnalysisResult(
+            path=rel_path,
+            language="yaml",
+            keys=keys,
+            key_hierarchy=[KeyHierarchyEntry(**e) for e in key_hierarchy],
+        )
+        return out.model_dump(mode="json")
 
     # Generic fallback: minimal result for other languages (JS/TS)
     result = {"path": rel_path, "imports": [], "functions": [], "classes": []}
