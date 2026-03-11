@@ -41,3 +41,7 @@ Running analysis on at least one target codebase produces:
 - `src/tools/` — Repo tools (clone, analyze)
 - `src/cli.py` — Entry point
 - `src/orchestrator.py` — Pipeline wiring
+
+## Graph schema versioning
+
+Stored JSON graphs include a `schema_version` field. See [docs/SCHEMA_VERSIONING.md](docs/SCHEMA_VERSIONING.md) for versioning and migration strategy as the schema evolves.
