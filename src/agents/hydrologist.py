@@ -288,7 +288,7 @@ class Hydrologist:
                 try:
                     source_bytes = full.read_bytes()
                 except Exception as e:
-                    logger.warning("Skip %s: %s", rel_str, e)
+                    logger.warning("Skip file (read error): %s — %s", rel_str, e)
                     continue
                 ext = Path(rel_str).suffix.lower()
                 if ext == ".py":
@@ -337,8 +337,25 @@ class Hydrologist:
     def trace_lineage(self, dataset_name: str, direction: str = "upstream") -> tuple[list[str], list[tuple[str, str, str]]]:
         return self._lineage.trace_lineage(dataset_name, direction)
 
-    def blast_radius(self, node_name: str, direction: str = "downstream") -> list[str]:
+    def blast_radius(self, node_name: str, direction: str = "downstream") -> dict[str, list[str]]:
         return self._lineage.blast_radius(node_name, direction)
+
+    def blast_radius_filtered(
+        self,
+        node_name: str,
+        direction: str = "downstream",
+        transformation_type: Optional[str] = None,
+    ) -> dict[str, list[str]]:
+        """Blast radius considering only edges with the given transformation_type."""
+        return self._lineage.blast_radius_filtered(node_name, direction, transformation_type)
+
+    def paths_between(self, source: str, target: str, max_paths: int = 50) -> list[list[str]]:
+        """Enumerate simple paths from source to target (lineage explanation)."""
+        return self._lineage.paths_between(source, target, max_paths)
+
+    def rank_datasets(self, top_n: int = 20) -> list[dict]:
+        """Rank dataset nodes by fan-in + fan-out (most critical first)."""
+        return self._lineage.rank_datasets(top_n)
 
     def find_sources(self) -> list[str]:
         return self._lineage.find_sources()
