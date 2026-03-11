@@ -2,8 +2,8 @@
 SQL lineage extraction via sqlglot (PostgreSQL, BigQuery, Snowflake, DuckDB).
 
 Extracts table dependencies from SELECT/FROM/JOIN/WITH/CTE and dbt ref()/source().
-Unparseable SQL is logged and skipped. Output includes per-query source/target mappings
-with source file and line range. Distinguishes read (FROM/JOIN) vs write (CREATE/INSERT).
+Optional column-level lineage for key tables. Operation type classification
+(select, insert_append, insert_overwrite, create, etc.) for impact/risk.
 """
 
 import logging
@@ -20,17 +20,27 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_DIALECTS = ("postgres", "bigquery", "snowflake", "duckdb")
 
+# Operation types for impact/risk assessment
+OP_SELECT = "select"
+OP_INSERT_APPEND = "insert_append"
+OP_INSERT_OVERWRITE = "insert_overwrite"
+OP_CREATE = "create"
+OP_CREATE_REPLACE = "create_replace"
+OP_UNKNOWN = "unknown"
+
 
 def extract_sql_lineage(
     source: str,
     rel_path: str = "",
     dialect: str = "postgres",
+    include_column_lineage: bool = False,
 ) -> dict[str, Any]:
     """
     Parse SQL and return structured lineage:
     - tables_in, tables_out, refs, sources (aggregate)
-    - queries: list of per-query mappings with source_file, line_start, line_end, tables_in, tables_out
-    Tries 3+ dialects. Handles dbt ref() and source(). Logs and returns best-effort on parse failure.
+    - queries: per-query with source_file, line_start, line_end, tables_in, tables_out,
+      operation_type (select | insert_append | insert_overwrite | create | create_replace),
+      and optionally columns_in/columns_out for key tables when include_column_lineage=True.
     """
     result: dict[str, Any] = {
         "tables_in": [],
@@ -84,17 +94,34 @@ def extract_sql_lineage(
 
     tables_in = []
     tables_out = []
+    operation_type = OP_SELECT
+    columns_in: list[str] = []
+    columns_out: list[str] = []
     for table in parsed.find_all(sqlglot.exp.Table):
         name = table.name
         if table.db:
             name = f"{table.db}.{name}"
         tables_in.append(name)
+        if include_column_lineage and hasattr(table, "this"):
+            c = getattr(table, "this", None)
+            if c is not None and hasattr(c, "name"):
+                columns_in.append(c.name)
     for create in parsed.find_all(sqlglot.exp.Create):
         if create.this:
             tables_out.append(create.this.name)
+        operation_type = OP_CREATE_REPLACE if getattr(create, "replace", False) else OP_CREATE
+        if include_column_lineage and create.this:
+            for c in (getattr(create.this, "columns", None) or []):
+                if hasattr(c, "name"):
+                    columns_out.append(c.name)
     for insert in parsed.find_all(sqlglot.exp.Insert):
         if insert.this:
             tables_out.append(insert.this.name)
+        operation_type = OP_INSERT_OVERWRITE if "overwrite" in source.lower().split("insert")[-1].split("(")[0] else OP_INSERT_APPEND
+        if include_column_lineage:
+            for c in (getattr(insert, "columns", None) or []):
+                if hasattr(c, "name"):
+                    columns_out.append(c.name)
 
     # Filter out CTE aliases so internal CTE names are not treated as external datasets
     cte_aliases: set[str] = set()
@@ -114,11 +141,16 @@ def extract_sql_lineage(
 
     result["tables_in"] = list(dict.fromkeys(tables_in + result["refs"] + result["sources"]))
     result["tables_out"] = list(dict.fromkeys(tables_out))
-    result["queries"].append({
+    q = {
         "source_file": rel_path,
         "line_start": line_start,
         "line_end": line_end,
         "tables_in": list(dict.fromkeys(tables_in)),
         "tables_out": list(dict.fromkeys(tables_out)),
-    })
+        "operation_type": operation_type,
+    }
+    if include_column_lineage:
+        q["columns_in"] = list(dict.fromkeys(columns_in))
+        q["columns_out"] = list(dict.fromkeys(columns_out))
+    result["queries"].append(q)
     return result
