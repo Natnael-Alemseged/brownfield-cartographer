@@ -284,12 +284,20 @@ class Surveyor:
     """
     Static structure analyst: builds module graph, git velocity, and dead-code candidates.
     Accepts only local filesystem paths; CLI handles cloning.
+    Configurable: git_velocity_days, dead_code_entry_substrings (excluded from dead-code).
     """
 
-    def __init__(self, output_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        output_dir: Optional[Path] = None,
+        git_velocity_days: int = 30,
+        dead_code_entry_substrings: Optional[list[str]] = None,
+    ) -> None:
         self.output_dir = Path(output_dir) if output_dir else Path(".cartography")
         self._language_router = LanguageRouter()
         self._git_velocity_cache: dict[tuple[str, int], tuple[dict[str, int], set[str]]] = {}
+        self.git_velocity_days = git_velocity_days
+        self.dead_code_entry_substrings = dead_code_entry_substrings or ["dag", "main", "app", "__main__"]
 
     def analyze_module(self, path: str) -> Optional[ModuleNode]:
         """
@@ -395,7 +403,7 @@ class Surveyor:
                 try:
                     source_bytes = full.read_bytes()
                 except (OSError, UnicodeDecodeError) as e:
-                    logger.warning("Skip %s: %s", rel_str, e)
+                    logger.warning("Skip file (read error): %s — %s", rel_str, e)
                     continue
                 if ext == ".py":
                     parser = Parser(Language(python_lang()))
@@ -471,7 +479,7 @@ class Surveyor:
                     G.nodes[n]["scc_size"] = len(comp)
         logger.info("Found %d strongly connected component(s)", len(sccs))
 
-        # Dead-code candidates: in_degree == 0 excluding entry points (main.py, app.py, DAGs)
+        # Dead-code candidates: in_degree == 0 excluding entry points (configurable substrings)
         def _is_entry_point(path_str: str) -> bool:
             path_lower = path_str.lower()
             if path_str.endswith("/main.py") or path_str == "main.py":
@@ -480,8 +488,9 @@ class Surveyor:
                 return True
             if path_str.endswith("/__main__.py") or path_str == "__main__.py":
                 return True
-            if ENTRY_POINT_SUBSTR in path_lower:
-                return True
+            for sub in self.dead_code_entry_substrings:
+                if sub.lower() in path_lower:
+                    return True
             return False
 
         for rel_str, node in path_to_node.items():
@@ -495,12 +504,12 @@ class Surveyor:
         dead_count = sum(1 for n in path_to_node.values() if n.is_dead_code_candidate)
         logger.info("Marked %d dead-code candidate(s) (in_degree=0, excluding entry points)", dead_count)
 
-        # Git velocity (run once per repo, cached)
-        cache_key = (repo_path, 30)
+        # Git velocity (run once per repo, cached; configurable window)
+        cache_key = (repo_path, self.git_velocity_days)
         if cache_key not in self._git_velocity_cache:
-            self._git_velocity_cache[cache_key] = self.extract_git_velocity(repo_path, 30)
+            self._git_velocity_cache[cache_key] = self.extract_git_velocity(repo_path, self.git_velocity_days)
         velocity, high_churn = self._git_velocity_cache[cache_key]
-        logger.info("Computed git velocity: %d file(s) changed in last 30 days (cached)", len(velocity))
+        logger.info("Computed git velocity: %d file(s) changed in last %d days (cached)", len(velocity), self.git_velocity_days)
         for rel_str in path_to_node:
             path_to_node[rel_str].change_velocity_30d = velocity.get(rel_str, 0)
             if G.has_node(rel_str):
@@ -524,6 +533,9 @@ class Surveyor:
         storage.write_json(out_file)
         logger.info("Wrote %s", out_file)
 
+        # Human-friendly survey summary: hotspots, high-velocity, risky cycles
+        self._write_survey_summary(repo_path, storage, out)
+
         # Git commit history and progression analysis (from repo_tools)
         try:
             logger.info("Extracting git commit history ...")
@@ -543,3 +555,43 @@ class Surveyor:
             logger.warning("Git history/progression analysis failed: %s", e)
 
         return out_file
+
+    def _write_survey_summary(self, repo_path: str, storage: ModuleGraphStorage, out: Path) -> None:
+        """Write a concise human-friendly survey summary: top hotspots, high-velocity files, risky cycles."""
+        G = storage.graph
+        velocity, high_churn = self.extract_git_velocity(repo_path, self.git_velocity_days)
+        lines = [
+            "# Survey Summary",
+            "",
+            "## Top hotspots (PageRank)",
+            "",
+        ]
+        if G.number_of_nodes() > 0:
+            pr = nx.pagerank(G)
+            top = sorted(pr.items(), key=lambda x: -x[1])[:10]
+            for path, score in top:
+                lines.append(f"- `{path}` — {score:.4f}")
+        else:
+            lines.append("- (no nodes)")
+        lines.extend(["", "## High-velocity files (most changed)", ""])
+        if velocity:
+            top_velocity = sorted(velocity.items(), key=lambda x: -x[1])[:10]
+            for path, count in top_velocity:
+                lines.append(f"- `{path}` — {count} change(s)")
+        else:
+            lines.append("- (no git history or no changes)")
+        lines.extend(["", "## Risky cycles (strongly connected components, size > 1)", ""])
+        sccs = list(nx.strongly_connected_components(G))
+        cycles = [c for c in sccs if len(c) > 1]
+        if cycles:
+            for i, comp in enumerate(cycles[:10], 1):
+                nodes = sorted(comp)
+                lines.append(f"**Cycle {i}** ({len(comp)} nodes): " + ", ".join(f"`{n}`" for n in nodes[:15]))
+                if len(nodes) > 15:
+                    lines.append(f"  ... and {len(nodes) - 15} more")
+        else:
+            lines.append("- (no cycles detected)")
+        path = out / "survey_summary.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("Wrote %s", path)
