@@ -142,51 +142,34 @@ def sql_lineage_analyzer(
     repo_path: Path, rel_path: str, source_bytes: bytes
 ) -> list[TransformationNode]:
     """
-    Use sqlglot to parse SQL and extract table dependencies (FROM/JOIN/WITH).
-    Handles dbt ref('model') and source('schema','table') as string literals.
-    Supports PostgreSQL, BigQuery, Snowflake, DuckDB via sqlglot.
+    Use sqlglot (via extract_sql_lineage) to parse SQL and extract table dependencies.
+    Handles dbt ref('model') and source('schema','table'). Supports 4 dialects.
+    Unparseable SQL is logged by extract_sql_lineage; returns empty list or best-effort.
     """
-    import sqlglot
     try:
         source = source_bytes.decode("utf-8", errors="replace")
     except Exception:
         return []
-    tables_in = []
-    tables_out = []
-    # dbt ref('x') and source('s','t') first
-    for m in re.finditer(r"ref\s*\(\s*['\"]([^'\"]+)['\"]", source):
-        tables_in.append(m.group(1))
-    for m in re.finditer(r"source\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]", source):
-        tables_in.append(f"{m.group(1)}.{m.group(2)}")
-    # dbt model output = filename without extension (e.g. models/customers.sql -> customers)
-    model_name = Path(rel_path).stem
-    for dialect in ("postgres", "bigquery", "snowflake", "duckdb"):
-        try:
-            parsed = sqlglot.parse_one(source, dialect=dialect)
-            for table in parsed.find_all(sqlglot.exp.Table):
-                name = table.name
-                if table.db:
-                    name = f"{table.db}.{name}"
-                tables_in.append(name)
-            for create in parsed.find_all(sqlglot.exp.Create):
-                if create.this:
-                    tables_out.append(create.this.name)
-            for insert in parsed.find_all(sqlglot.exp.Insert):
-                if insert.this:
-                    tables_out.append(insert.this.name)
-            break
-        except Exception:
-            continue
-    if not tables_out and model_name:
-        tables_out = [model_name]
+    from src.analyzers.sql_lineage import extract_sql_lineage
+
+    result = extract_sql_lineage(source, rel_path=rel_path)
+    tables_in = result.get("tables_in", [])
+    tables_out = result.get("tables_out", [])
     if not tables_in and not tables_out:
         return []
+    # Use line range from first query if available
+    line_start, line_end = 0, 0
+    queries = result.get("queries", [])
+    if queries:
+        q = queries[0]
+        line_start = q.get("line_start", 0)
+        line_end = q.get("line_end", 0)
     return [TransformationNode(
         source_datasets=list(dict.fromkeys(tables_in)),
         target_datasets=list(dict.fromkeys(tables_out)),
         transformation_type="sql",
         source_file=rel_path,
-        line_range=(0, 0),
+        line_range=(line_start, line_end),
         sql_query_if_applicable=source[:2000],
     )]
 
