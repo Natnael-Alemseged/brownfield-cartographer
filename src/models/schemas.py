@@ -1,9 +1,20 @@
 """Pydantic schemas for the knowledge graph (nodes and edges)."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+class EdgeType(str, Enum):
+    """Typed edge types for module and lineage graphs."""
+
+    IMPORTS = "IMPORTS"  # module -> module (imports)
+    REFERENCES_SQL = "REFERENCES_SQL"  # module -> sql file
+    REFERENCES_CONFIG = "REFERENCES_CONFIG"  # module -> config file
+    PRODUCES = "PRODUCES"  # transformation -> dataset
+    CONSUMES = "CONSUMES"  # dataset -> transformation
 
 
 class FunctionInfo(BaseModel):
@@ -47,6 +58,25 @@ class ModuleNode(BaseModel):
     lines_of_code: int = 0
     comment_ratio: float = 0.0
     cyclomatic_complexity: int = Field(default=0, ge=0, description="Decision points (if/else/loop/etc.)")
+
+    @field_validator("path")
+    @classmethod
+    def path_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("path must be non-empty")
+        return v.strip()
+
+
+class FunctionNode(BaseModel):
+    """Node representing a function/symbol in the module graph (for fine-grained analysis)."""
+
+    name: str = Field(description="Function or symbol name")
+    module_path: str = Field(description="Relative path of the containing module")
+    signature: str = Field(default="", description="Full or truncated signature")
+    line_start: int = Field(default=0, ge=0)
+    line_end: int = Field(default=0, ge=0)
+    is_method: bool = Field(default=False, description="True if defined inside a class")
+    class_name: Optional[str] = Field(default=None, description="Containing class if is_method")
 
 
 class DatasetNode(BaseModel):
