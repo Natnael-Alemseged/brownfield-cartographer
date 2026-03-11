@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Optional
 
 import networkx as nx
-from networkx.readwrite import json_graph
 
 from src.cartographer.core.language_router import LanguageRouter
-from src.models import ClassInfo, FunctionInfo, ModuleNode
+from src.cartographer.knowledge_graph import ModuleGraphStorage
+from src.models import ClassInfo, EdgeType, FunctionInfo, ModuleNode
 from src.tools.repo_tools import analyze_git_progression, extract_git_history
 
 logger = logging.getLogger(__name__)
@@ -363,7 +363,7 @@ class Surveyor:
         high_churn = set(sorted_paths[:top_20_percent_count])
         return count, high_churn
 
-    def build_module_graph(self, repo_path: str) -> nx.DiGraph:
+    def build_module_graph(self, repo_path: str) -> "ModuleGraphStorage":
         """
         Build a NetworkX DiGraph of modules (nodes = path, edges = imports).
         Populates node attributes with ModuleNode data and adds PageRank and SCC info.
@@ -411,23 +411,24 @@ class Surveyor:
                     )
                 if node:
                     path_to_node[rel_str] = node
-                    G.add_node(rel_str, module_node=node.model_dump(mode="json"))
 
         logger.info("Found %d modules (nodes)", len(path_to_node))
+        # Use shared module graph storage with typed nodes and edges
+        storage = ModuleGraphStorage()
+        for rel_str, node in path_to_node.items():
+            storage.add_module_node(node)
         # Edges: imports (only Python imports for now)
         import_edge_count = 0
         for rel_str, node in path_to_node.items():
             for imp in node.imports:
-                # imp might be "foo.bar" or "foo"; we store edges to same-repo modules
                 target = imp
                 if target not in path_to_node:
-                    # Try as path: foo/bar -> foo/bar.py
                     candidate = target.replace(".", "/") + ".py"
                     if candidate in path_to_node:
                         target = candidate
                     else:
                         continue
-                G.add_edge(rel_str, target, edge_type="IMPORTS")
+                storage.add_edge(rel_str, target, EdgeType.IMPORTS)
                 import_edge_count += 1
         logger.info("Added %d IMPORTS edges", import_edge_count)
 
@@ -445,10 +446,13 @@ class Surveyor:
             except Exception:
                 continue
             for target_path, edge_type in _collect_cross_language_refs(source_bytes, rel_str, path_to_node):
-                if G.has_node(target_path) and target_path != rel_str:
-                    G.add_edge(rel_str, target_path, edge_type=edge_type)
+                if storage.graph.has_node(target_path) and target_path != rel_str:
+                    etype = EdgeType.REFERENCES_SQL if edge_type == "REFERENCES_SQL" else EdgeType.REFERENCES_CONFIG
+                    storage.add_edge(rel_str, target_path, etype)
                     ref_edge_count += 1
         logger.info("Added %d cross-language REFERENCES_SQL/REFERENCES_CONFIG edges", ref_edge_count)
+
+        G = storage.graph
 
         # PageRank
         if G.number_of_nodes() > 0:
@@ -485,7 +489,9 @@ class Surveyor:
             has_exports = bool(node.public_functions or node.classes) or rel_str.endswith(".py")
             if has_exports and in_degree == 0 and not _is_entry_point(rel_str):
                 node.is_dead_code_candidate = True
-            G.nodes[rel_str]["module_node"] = node.model_dump(mode="json")
+            # Update module_node dict in place so pagerank/scc_id are preserved
+            if G.has_node(rel_str):
+                G.nodes[rel_str]["module_node"] = node.model_dump(mode="json")
         dead_count = sum(1 for n in path_to_node.values() if n.is_dead_code_candidate)
         logger.info("Marked %d dead-code candidate(s) (in_degree=0, excluding entry points)", dead_count)
 
@@ -500,7 +506,7 @@ class Surveyor:
             if G.has_node(rel_str):
                 G.nodes[rel_str]["module_node"] = path_to_node[rel_str].model_dump(mode="json")
 
-        return G
+        return storage
 
     def analyze_repository(
         self, repo_path: str, output_dir: Optional[Path] = None
@@ -512,14 +518,10 @@ class Surveyor:
         out = Path(output_dir) if output_dir else self.output_dir
         out.mkdir(parents=True, exist_ok=True)
         logger.info("Output directory: %s", out)
-        G = self.build_module_graph(repo_path)
-        # Serialize for JSON: use node-link format; module_node is a dict (Pydantic model_dump)
-        data = json_graph.node_link_data(G)
+        storage = self.build_module_graph(repo_path)
         out_file = out / "module_graph.json"
-        import json
         logger.info("Writing %s ...", out_file)
-        with open(out_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        storage.write_json(out_file)
         logger.info("Wrote %s", out_file)
 
         # Git commit history and progression analysis (from repo_tools)
