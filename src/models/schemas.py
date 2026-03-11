@@ -109,3 +109,78 @@ class TransformationNode(BaseModel):
         default=None,
         description="If from notebook: {cell_index, cell_type}",
     )
+
+
+# ---- Typed AST analysis results (per-language, for downstream consumption) ----
+
+
+class FunctionDefResult(BaseModel):
+    """Single function from AST extraction."""
+
+    name: str
+    signature: str = ""
+    line_start: int = 0
+    line_end: int = 0
+    decorators: list[str] = Field(default_factory=list)
+
+
+class ClassDefResult(BaseModel):
+    """Single class from AST extraction."""
+
+    name: str
+    bases: list[str] = Field(default_factory=list)
+    parent_classes: list[str] = Field(default_factory=list)
+    line_start: int = 0
+    line_end: int = 0
+
+
+class PythonAnalysisResult(BaseModel):
+    """Structured result of Python file AST analysis."""
+
+    path: str
+    language: str = "python"
+    imports: list[str] = Field(default_factory=list)
+    star_imports: list[str] = Field(default_factory=list, description="from x import * (module names)")
+    dynamic_imports: list[str] = Field(default_factory=list, description="Unresolved or dynamic import hints")
+    functions: list[FunctionDefResult] = Field(default_factory=list)
+    classes: list[ClassDefResult] = Field(default_factory=list)
+
+
+class TableRefResult(BaseModel):
+    """Table reference from SQL AST."""
+
+    name: str
+    line: int = 0
+
+
+class QueryStructureResult(BaseModel):
+    """Query structure hint from SQL AST."""
+
+    type: str
+    line_start: int = 0
+    line_end: int = 0
+
+
+class SqlAnalysisResult(BaseModel):
+    """Structured result of SQL file AST analysis."""
+
+    path: str
+    language: str = "sql"
+    tables: list[TableRefResult] = Field(default_factory=list)
+    query_structures: list[QueryStructureResult] = Field(default_factory=list)
+
+
+class KeyHierarchyEntry(BaseModel):
+    """Key entry in YAML hierarchy."""
+
+    key: str
+    line: int = 0
+
+
+class YamlAnalysisResult(BaseModel):
+    """Structured result of YAML file AST analysis."""
+
+    path: str
+    language: str = "yaml"
+    keys: list[str] = Field(default_factory=list)
+    key_hierarchy: list[KeyHierarchyEntry] = Field(default_factory=list)
