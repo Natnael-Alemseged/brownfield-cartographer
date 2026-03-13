@@ -24,10 +24,11 @@ from src.models import (
     EvidenceType,
     ModuleNode,
 )
+from src.tracing.cartography_trace import CartographyTrace
 
 logger = logging.getLogger(__name__)
 
-# Trace action types
+# Trace action types (for type hints; CartographyTrace accepts any str)
 TraceAction = Literal["purpose_extraction", "drift_detection", "cluster_labeling", "day_one_synthesis"]
 TraceStatus = Literal["success", "error", "skipped"]
 
@@ -131,48 +132,13 @@ class ContextWindowBudget:
 
 
 # -----------------------------------------------------------------------------
-# Trace Manager (Pillar 1: Auditability)
+# Trace: use shared CartographyTrace (Pillar 1: Auditability)
 # -----------------------------------------------------------------------------
 
 
-class TraceManager:
-    """Appends every LLM call and budget update to .cartography/cartography_trace.jsonl."""
-
-    def __init__(self, output_dir: Path) -> None:
-        self._output_dir = Path(output_dir)
-        self._path = self._output_dir / "cartography_trace.jsonl"
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-
-    def log(
-        self,
-        action: TraceAction,
-        *,
-        target_module: Optional[str] = None,
-        model_used: Optional[str] = None,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
-        cumulative_budget: Optional[dict] = None,
-        confidence_score: Optional[float] = None,
-        status: TraceStatus = "success",
-        error_message: Optional[str] = None,
-    ) -> None:
-        import time
-        record: dict[str, Any] = {
-            "timestamp": time.time(),
-            "agent": "semanticist",
-            "action": action,
-            "target_module": target_module,
-            "model_used": model_used,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cumulative_budget": cumulative_budget,
-            "confidence_score": confidence_score,
-            "status": status,
-        }
-        if error_message:
-            record["error_message"] = error_message
-        with open(self._path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, default=str) + "\n")
+def TraceManager(output_dir: Path, run_id: Optional[str] = None) -> CartographyTrace:
+    """Backward-compatible trace for Semanticist; uses shared CartographyTrace with agent='semanticist'."""
+    return CartographyTrace(Path(output_dir), agent="semanticist", run_id=run_id)
 
 
 # -----------------------------------------------------------------------------
@@ -680,6 +646,7 @@ class Semanticist:
         repo_path: str,
         output_dir: Optional[Path] = None,
         changed_files: Optional[list[str]] = None,
+        run_id: Optional[str] = None,
     ) -> tuple[Optional[Path], Optional[Path], Optional[Path]]:
         """
         Run Semanticist: load module graph, generate purposes, cluster domains, answer Day-One questions.
@@ -710,7 +677,7 @@ class Semanticist:
             model_bulk=self.model_bulk,
             model_synthesis=self.model_synthesis,
         )
-        trace = TraceManager(out)
+        trace = TraceManager(out, run_id=run_id)
 
         # Determine which modules to process (incremental vs full)
         def module_scope() -> list[str]:
@@ -801,6 +768,29 @@ class Semanticist:
         day_one_json, onboarding_md = answer_day_one_questions(
             storage, lineage_path, survey_summary, lineage_summary, out, budget, trace
         )
+
+        # Evidence verification: validate Day-One evidence and log to trace
+        if day_one_json and day_one_json.exists():
+            try:
+                from src.evidence_verification import verify_evidence_list
+                data = json.loads(day_one_json.read_text(encoding="utf-8"))
+                answers = data.get("answers") or []
+                all_evidence = []
+                for a in answers:
+                    evidence_list = a.get("evidence_list") or []
+                    if not isinstance(evidence_list, list):
+                        continue
+                    for e in evidence_list:
+                        if not isinstance(e, dict):
+                            continue
+                        try:
+                            all_evidence.append(EvidenceEntry.model_validate(e))
+                        except Exception:
+                            pass
+                if all_evidence:
+                    verify_evidence_list(all_evidence, repo, trace=trace)
+            except Exception as e:
+                logger.debug("Evidence verification failed: %s", e)
 
         return module_graph_path, day_one_json, onboarding_md
 

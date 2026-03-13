@@ -6,7 +6,10 @@ Commands (subset modes):
   lineage  — lineage-only: data lineage from SQL/Python/dbt/notebooks (writes lineage_graph.json, lineage_summary.md)
   semantic — LLM purpose extraction, domain clustering, Day-One brief (requires survey + optional lineage outputs)
   analyze  — full pipeline: survey then lineage (all artifacts)
-  full     — full pipeline including Semanticist: survey -> lineage -> semantic
+  full     — full pipeline: survey -> lineage -> semantic -> archivist (CODEBASE.md)
+  query    — run Navigator query on .cartography/ (e.g. "What produces X?")
+  living-context — regenerate CODEBASE.md from existing .cartography/ (run full first)
+  self-audit — compare Week 1 doc with CODEBASE.md; write self_audit_report.md
 """
 
 import argparse
@@ -22,10 +25,14 @@ if __name__ == "__main__":
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
 
+from src.agents.archivist import generate_CODEBASE_md
 from src.agents.hydrologist import Hydrologist
+from src.agents.navigator import run_query as navigator_run_query
 from src.agents.semanticist import Semanticist
 from src.agents.surveyor import Surveyor
-from src.orchestrator import run_analysis, run_full_pipeline
+from src.orchestrator import run_analysis, run_full_pipeline, run_full_pipeline_incremental
+from src.self_audit import run_self_audit
+from src.tracing.cartography_trace import CartographyTrace
 from src.tools.repo_tools import RepoSandbox, is_safe_url
 
 GIT_URL_PATTERN = re.compile(r"^(https?://|git@)")
@@ -197,10 +204,16 @@ def cmd_analyze(input_path: str, output_dir: Path | None = None, verbose: bool =
     return 0
 
 
-def cmd_full(input_path: str, output_dir: Path | None = None, verbose: bool = False) -> int:
-    """Run full pipeline: Surveyor -> Hydrologist -> Semanticist (all artifacts including Day-One brief)."""
+def cmd_full(
+    input_path: str,
+    output_dir: Path | None = None,
+    verbose: bool = False,
+    incremental: bool = False,
+) -> int:
+    """Run full pipeline: Surveyor -> Hydrologist -> Semanticist -> Archivist. Use --incremental to re-run only changed (git)."""
     _configure_survey_logging(verbose=verbose)
     output_dir = output_dir or Path.cwd() / ".cartography"
+    run_fn = run_full_pipeline_incremental if incremental else run_full_pipeline
     if _is_git_url(input_path):
         url = input_path.strip()
         if not is_safe_url(url):
@@ -209,9 +222,9 @@ def cmd_full(input_path: str, output_dir: Path | None = None, verbose: bool = Fa
         try:
             print("[CLI] Cloning repository ...")
             with RepoSandbox(url) as temp_path:
-                print(f"[CLI] Clone complete. Running full pipeline (survey -> lineage -> semantic) at {temp_path}")
-                mg, lg, ls, day_one_json, onboarding_md = run_full_pipeline(temp_path, output_dir=output_dir)
-                print(f"[CLI] Full pipeline complete. Outputs: {mg}, {lg}, {ls}, {day_one_json}, {onboarding_md}")
+                print(f"[CLI] Clone complete. Running full pipeline at {temp_path}" + (" (incremental)" if incremental else ""))
+                mg, lg, ls, day_one_json, onboarding_md = run_fn(temp_path, output_dir=output_dir)
+                print(f"[CLI] Full pipeline complete. Outputs: {mg}, {lg}, {ls}, {day_one_json}, {onboarding_md}; CODEBASE.md in {output_dir}")
         except (ValueError, RuntimeError) as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
@@ -221,29 +234,94 @@ def cmd_full(input_path: str, output_dir: Path | None = None, verbose: bool = Fa
             print(f"Error: path does not exist: {path}", file=sys.stderr)
             return 1
         try:
-            print(f"[CLI] Running full pipeline at {path}")
-            mg, lg, ls, day_one_json, onboarding_md = run_full_pipeline(str(path), output_dir=output_dir)
-            print(f"[CLI] Full pipeline complete. Outputs: {mg}, {lg}, {ls}, {day_one_json}, {onboarding_md}")
+            print(f"[CLI] Running full pipeline at {path}" + (" (incremental)" if incremental else ""))
+            mg, lg, ls, day_one_json, onboarding_md = run_fn(str(path), output_dir=output_dir)
+            print(f"[CLI] Full pipeline complete. Outputs: {mg}, {lg}, {ls}, {day_one_json}, {onboarding_md}; CODEBASE.md in {output_dir}")
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
     return 0
 
 
+def cmd_query(question: str, output_dir: Path | None = None, verbose: bool = False) -> int:
+    """Run Navigator query on existing .cartography/ (run full first)."""
+    _configure_survey_logging(verbose=verbose)
+    output_dir = output_dir or Path.cwd() / ".cartography"
+    if not (output_dir / "module_graph.json").exists():
+        print("Error: module_graph.json not found. Run 'survey' or 'full' first.", file=sys.stderr)
+        return 1
+    try:
+        answer, evidence = navigator_run_query(output_dir, question)
+        print(answer)
+        if verbose and evidence:
+            print("\n[Evidence]")
+            for e in evidence:
+                print(f"  {e.file_path}:{e.line_start}-{e.line_end} [{e.evidence_type}] {e.confidence or ''}")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_self_audit(week1_repo_path: str, output_dir: Path | None = None, verbose: bool = False) -> int:
+    """Compare Week 1 doc (ARCHITECTURE_NOTES.md or RECONNAISSANCE.md) with CODEBASE.md; write .cartography/self_audit_report.md."""
+    _configure_survey_logging(verbose=verbose)
+    path = Path(week1_repo_path).resolve()
+    if not path.exists() or not path.is_dir():
+        print(f"Error: path does not exist or is not a directory: {path}", file=sys.stderr)
+        return 1
+    out = output_dir or path / ".cartography"
+    try:
+        report_path = run_self_audit(path, output_dir=out)
+        print(f"[CLI] Self-audit report written: {report_path}")
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_living_context(output_dir: Path | None = None, repo_path: str | None = None, verbose: bool = False) -> int:
+    """Regenerate CODEBASE.md from existing .cartography/ artifacts (run survey+lineage+semantic first)."""
+    _configure_survey_logging(verbose=verbose)
+    output_dir = output_dir or Path.cwd() / ".cartography"
+    if not (output_dir / "module_graph.json").exists():
+        print("Error: module_graph.json not found. Run 'survey' or 'full' first.", file=sys.stderr)
+        return 1
+    try:
+        trace = CartographyTrace(output_dir, agent="archivist")
+        path_obj = Path(repo_path).resolve() if repo_path else None
+        codebase_path = generate_CODEBASE_md(
+            output_dir,
+            repo_name=path_obj.name if path_obj else "repository",
+            repo_path=path_obj,
+            run_id=trace.run_id,
+            trace=trace,
+        )
+        print(f"[CLI] CODEBASE.md written: {codebase_path}")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
-    """Dispatch subcommands: survey, lineage, semantic, analyze, full."""
+    """Dispatch subcommands: survey, lineage, semantic, analyze, full, living-context."""
     parser = argparse.ArgumentParser(
         description="Brownfield Cartographer: codebase and data lineage analysis.",
-        epilog="Modes: survey, lineage, semantic, analyze (survey+lineage), full (survey+lineage+semantic).",
+        epilog="Modes: survey, lineage, semantic, analyze (survey+lineage), full (survey+lineage+semantic+archivist), living-context (regenerate CODEBASE.md).",
     )
     parser.add_argument(
         "command",
-        choices=["survey", "lineage", "semantic", "analyze", "full"],
-        help="survey | lineage | semantic | analyze | full",
+        choices=["survey", "lineage", "semantic", "analyze", "full", "query", "living-context", "self-audit"],
+        help="survey | lineage | semantic | analyze | full | query | living-context | self-audit",
     )
-    parser.add_argument("input", help="Local directory or GitHub repo URL")
+    parser.add_argument("input", help="Local path, GitHub URL, or query string (for query command)")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Output directory (default: .cartography)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Per-file / verbose logging")
+    parser.add_argument("--incremental", action="store_true", help="Incremental run (only for 'full': re-run Semanticist on changed files)")
     args = parser.parse_args()
     output_dir = args.output or Path.cwd() / ".cartography"
 
@@ -256,7 +334,13 @@ def main() -> int:
     if args.command == "analyze":
         return cmd_analyze(args.input, output_dir=output_dir, verbose=args.verbose)
     if args.command == "full":
-        return cmd_full(args.input, output_dir=output_dir, verbose=args.verbose)
+        return cmd_full(args.input, output_dir=output_dir, verbose=args.verbose, incremental=args.incremental)
+    if args.command == "query":
+        return cmd_query(args.input.strip(), output_dir=output_dir, verbose=args.verbose)
+    if args.command == "living-context":
+        return cmd_living_context(output_dir=output_dir, repo_path=args.input or None, verbose=args.verbose)
+    if args.command == "self-audit":
+        return cmd_self_audit(args.input, output_dir=output_dir, verbose=args.verbose)
     return 2
 
 
