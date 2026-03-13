@@ -2,9 +2,21 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+# Phase 3: Documentation drift taxonomy (Semanticist)
+DocDriftSeverity = Literal["critical", "major", "minor"]
+DocDriftType = Literal[
+    "STALE_DESCRIPTION",
+    "MISSING_PARAMETERS",
+    "SIDE_EFFECTS_UNDOCUMENTED",
+    "RAISES_UNDOCUMENTED",
+]
+
+# Phase 3: Evidence provenance for Day-One answers (Semanticist / Navigator)
+EvidenceType = Literal["static_analysis", "semantic_inference", "lineage_graph", "git_history"]
 
 
 class EdgeType(str, Enum):
@@ -46,6 +58,12 @@ class ModuleNode(BaseModel):
     language: str = Field(description="e.g. python, sql, yaml")
     purpose_statement: Optional[str] = Field(default=None, description="LLM-generated (Phase 3)")
     domain_cluster: Optional[str] = Field(default=None, description="Inferred domain (Phase 3)")
+    doc_drift_severity: Optional[str] = Field(default=None, description="critical|major|minor (Phase 3)")
+    doc_drift_type: Optional[str] = Field(default=None, description="STALE_DESCRIPTION|MISSING_PARAMETERS|etc (Phase 3)")
+    analysis_error: Optional[str] = Field(
+        default=None,
+        description="If purpose extraction failed: binary_file|encoding_error|syntax_error|budget_exceeded (Phase 3)",
+    )
     complexity_score: float = Field(default=0.0, ge=0, description="e.g. cyclomatic or LOC-based")
     change_velocity_30d: int = Field(default=0, ge=0, description="Number of changes in last 30 days")
     is_dead_code_candidate: bool = Field(default=False, description="Exported but no inbound imports")
@@ -184,3 +202,28 @@ class YamlAnalysisResult(BaseModel):
     language: str = "yaml"
     keys: list[str] = Field(default_factory=list)
     key_hierarchy: list[KeyHierarchyEntry] = Field(default_factory=list)
+
+
+# ---- Phase 3: Semanticist Day-One answers (structured evidence for Navigator) ----
+
+
+class EvidenceEntry(BaseModel):
+    """Single evidence citation for a Day-One answer."""
+
+    file_path: str = Field(description="Relative path to source file")
+    line_start: int = Field(default=0, ge=0)
+    line_end: int = Field(default=0, ge=0)
+    description: str = Field(default="", description="Short description of what this evidence shows")
+    evidence_type: EvidenceType = Field(
+        default="static_analysis",
+        description="Provenance: static_analysis | semantic_inference | lineage_graph | git_history",
+    )
+
+
+class DayOneAnswer(BaseModel):
+    """One of the Five FDE Day-One answers with evidence citations."""
+
+    question_id: int = Field(description="1-5 for the five questions")
+    answer_text: str = Field(default="", description="Answer body")
+    evidence_list: list[EvidenceEntry] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0, le=1, description="0-1 confidence")
