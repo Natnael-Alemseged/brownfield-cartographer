@@ -176,6 +176,17 @@ def generate_CODEBASE_md(
         except Exception as e:
             logger.warning("Could not load module graph for Critical Path: %s", e)
 
+    # Diagrams (dependency and lineage images)
+    dep_png = output_dir / "dependency_graph.png"
+    lineage_png = output_dir / "lineage_graph.png"
+    if dep_png.exists() or lineage_png.exists():
+        lines.extend(["## Diagrams", ""])
+        if dep_png.exists():
+            lines.append("- **Module dependencies:** `dependency_graph.png` (import graph)")
+        if lineage_png.exists():
+            lines.append("- **Data lineage:** `lineage_graph.png` (sources and sinks)")
+        lines.append("")
+
     # Data Sources & Sinks
     lineage_graph_path = output_dir / "lineage_graph.json"
     if lineage_graph_path.exists():
