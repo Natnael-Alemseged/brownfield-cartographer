@@ -14,6 +14,7 @@ from typing import Optional
 from src.cartographer.core.language_router import LanguageRouter
 from src.cartographer.knowledge_graph import LineageGraph
 from src.models import TransformationNode
+from src.tracing.cartography_trace import CartographyTrace
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +261,10 @@ class Hydrologist:
         self._lineage = LineageGraph()
 
     def analyze_repository(
-        self, repo_path: str, output_dir: Optional[Path] = None
+        self,
+        repo_path: str,
+        output_dir: Optional[Path] = None,
+        run_id: Optional[str] = None,
     ) -> tuple[Path, Path]:
         """
         Run all analyzers, build lineage graph, write lineage_graph.json and lineage_summary.md.
@@ -268,6 +272,7 @@ class Hydrologist:
         """
         out = Path(output_dir) if output_dir else self.output_dir
         out.mkdir(parents=True, exist_ok=True)
+        trace = CartographyTrace(out, agent="hydrologist", run_id=run_id)
         repo = Path(repo_path)
         self._lineage = LineageGraph()
 
@@ -303,6 +308,11 @@ class Hydrologist:
         self._lineage.write_json(json_path)
         summary_path = out / "lineage_summary.md"
         self._write_summary(summary_path)
+        trace.log(
+            "lineage_complete",
+            evidence_source="lineage_graph.json",
+            status="success",
+        )
         return json_path, summary_path
 
     def _write_summary(self, path: Path) -> None:

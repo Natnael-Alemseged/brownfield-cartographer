@@ -18,6 +18,7 @@ from src.cartographer.core.language_router import LanguageRouter
 from src.cartographer.knowledge_graph import ModuleGraphStorage
 from src.models import ClassInfo, EdgeType, FunctionInfo, ModuleNode
 from src.tools.repo_tools import analyze_git_progression, extract_git_history
+from src.tracing.cartography_trace import CartographyTrace
 
 logger = logging.getLogger(__name__)
 
@@ -518,7 +519,10 @@ class Surveyor:
         return storage
 
     def analyze_repository(
-        self, repo_path: str, output_dir: Optional[Path] = None
+        self,
+        repo_path: str,
+        output_dir: Optional[Path] = None,
+        run_id: Optional[str] = None,
     ) -> Path:
         """
         Run full survey: build module graph and write .cartography/module_graph.json.
@@ -527,6 +531,7 @@ class Surveyor:
         out = Path(output_dir) if output_dir else self.output_dir
         out.mkdir(parents=True, exist_ok=True)
         logger.info("Output directory: %s", out)
+        trace = CartographyTrace(out, agent="surveyor", run_id=run_id)
         storage = self.build_module_graph(repo_path)
         out_file = out / "module_graph.json"
         logger.info("Writing %s ...", out_file)
@@ -554,6 +559,11 @@ class Surveyor:
         except Exception as e:
             logger.warning("Git history/progression analysis failed: %s", e)
 
+        trace.log(
+            "survey_complete",
+            evidence_source="module_graph.json",
+            status="success",
+        )
         return out_file
 
     def _write_survey_summary(self, repo_path: str, storage: ModuleGraphStorage, out: Path) -> None:
