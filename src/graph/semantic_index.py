@@ -1,16 +1,20 @@
 """
 Semantic index stub (Phase 4 prep): vector store of module purpose statements for semantic search.
 
-Schema: module_path, purpose_embedding, purpose_text, domain_cluster, embedding_model.
-Output: .cartography/semantic_index/manifest.jsonl + embeddings.npy.
+Schema: manifest.jsonl per line: module_path, purpose_text, domain_cluster, embedding_model, generated_at, embedding_index.
+embeddings.npy: shape (N, D); D variable for TF-IDF stub, optional 384 for all-MiniLM-L6-v2.
+search() returns (module_path, score); search_to_evidence() returns list[EvidenceEntry] for Navigator.
 """
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+from src.models import EvidenceEntry
 
 logger = logging.getLogger(__name__)
 
@@ -110,12 +114,51 @@ class SemanticIndexStore:
         top_idx = np.argsort(-scores)[:k]
         return [(self._module_paths[i], float(scores[i])) for i in top_idx if i < len(self._module_paths)]
 
+    def search_to_evidence(
+        self,
+        query: str,
+        k: int = 10,
+    ) -> list[EvidenceEntry]:
+        """
+        Return top-k search results as EvidenceEntry list for Navigator.
+        confidence: high if similarity >= 0.8, medium if 0.5-0.8, low if < 0.5.
+        Scores are normalized to [0, 1] by max for stub (cosine would be 0-1 naturally).
+        """
+        pairs = self.search(query, k=k)
+        if not pairs:
+            return []
+        scores = [s for _, s in pairs]
+        max_s = max(scores) if scores else 1.0
+        norm = max_s if max_s > 0 else 1.0
+        out = []
+        for i, (module_path, score) in enumerate(pairs):
+            norm_score = score / norm
+            if norm_score >= 0.8:
+                conf = "high"
+            elif norm_score >= 0.5:
+                conf = "medium"
+            else:
+                conf = "low"
+            purpose = self._purpose_texts[self._module_paths.index(module_path)] if module_path in self._module_paths else ""
+            out.append(
+                EvidenceEntry(
+                    file_path=module_path,
+                    line_start=0,
+                    line_end=0,
+                    description=purpose[:200] if purpose else "semantic match",
+                    evidence_type="semantic_inference",
+                    confidence=conf,
+                )
+            )
+        return out
+
     def save(self, path: Path) -> None:
-        """Write manifest.jsonl and embeddings.npy to path (directory)."""
+        """Write manifest.jsonl (with generated_at) and embeddings.npy to path (directory)."""
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         emb = self._build_embeddings()
         np.save(path / "embeddings.npy", emb)
+        generated_at = datetime.now(timezone.utc).isoformat()
         manifest_path = path / "manifest.jsonl"
         with open(manifest_path, "w", encoding="utf-8") as f:
             for i, (mp, pt, dc) in enumerate(zip(self._module_paths, self._purpose_texts, self._domain_clusters)):
@@ -124,6 +167,7 @@ class SemanticIndexStore:
                     "purpose_text": pt,
                     "domain_cluster": dc,
                     "embedding_model": self.embedding_model,
+                    "generated_at": generated_at,
                     "embedding_index": i,
                 }
                 f.write(json.dumps(rec, default=str) + "\n")
@@ -144,4 +188,5 @@ class SemanticIndexStore:
                 inst._module_paths.append(rec["module_path"])
                 inst._purpose_texts.append(rec.get("purpose_text", ""))
                 inst._domain_clusters.append(rec.get("domain_cluster", ""))
+        # Backward compat: manifest may lack generated_at
         return inst
