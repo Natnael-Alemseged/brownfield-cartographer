@@ -1,9 +1,9 @@
 """
-Orchestrator: wires Surveyor + Hydrologist in sequence and serializes outputs to .cartography/.
+Orchestrator: wires Surveyor + Hydrologist (+ optional Semanticist) and serializes outputs to .cartography/.
 
-Usage: run_analysis(repo_path, output_dir) runs module graph (Surveyor) then lineage (Hydrologist).
-Per-file errors are isolated (logged and skipped) so partial results are always produced.
-Progress is logged to console. Writes module_graph.json and lineage_graph.json to output_dir.
+Usage:
+  run_analysis(repo_path, output_dir) — Surveyor then Hydrologist.
+  run_full_pipeline(repo_path, output_dir) — Surveyor then Hydrologist then Semanticist (Day-One brief).
 """
 
 import logging
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.agents.hydrologist import Hydrologist
+from src.agents.semanticist import Semanticist
 from src.agents.surveyor import Surveyor
 
 logger = logging.getLogger(__name__)
@@ -58,3 +59,29 @@ def run_analysis(
         logger.exception("Orchestrator: Hydrologist failed (partial results may exist): %s", e)
 
     return module_graph_path, lineage_graph_path, lineage_summary_path
+
+
+def run_full_pipeline(
+    repo_path: str,
+    output_dir: Optional[Path] = None,
+) -> tuple[
+    Optional[Path], Optional[Path], Optional[Path], Optional[Path], Optional[Path]
+]:
+    """
+    Run Surveyor then Hydrologist then Semanticist. Returns all artifact paths including Day-One brief.
+    Returns:
+        (module_graph_path, lineage_graph_path, lineage_summary_path, day_one_answers_json_path, onboarding_brief_md_path)
+    """
+    mg, lg, ls = run_analysis(repo_path, output_dir=output_dir)
+    out = Path(output_dir) if output_dir else Path(".cartography")
+    day_one_json = None
+    onboarding_md = None
+    if mg is not None:
+        logger.info("Orchestrator: running Semanticist (purpose extraction, domain clustering, Day-One brief)...")
+        try:
+            semanticist = Semanticist(output_dir=out)
+            _, day_one_json, onboarding_md = semanticist.analyze_repository(repo_path, output_dir=out)
+            logger.info("Orchestrator: Semanticist complete. Outputs: %s, %s", day_one_json, onboarding_md)
+        except Exception as e:
+            logger.exception("Orchestrator: Semanticist failed (partial results may exist): %s", e)
+    return mg, lg, ls, day_one_json, onboarding_md
