@@ -17,6 +17,7 @@ DocDriftType = Literal[
 
 # Phase 3: Evidence provenance for Day-One answers (Semanticist / Navigator)
 EvidenceType = Literal["static_analysis", "semantic_inference", "lineage_graph", "git_history"]
+EvidenceConfidence = Literal["high", "medium", "low"]
 
 
 class EdgeType(str, Enum):
@@ -208,7 +209,7 @@ class YamlAnalysisResult(BaseModel):
 
 
 class EvidenceEntry(BaseModel):
-    """Single evidence citation for a Day-One answer."""
+    """Single evidence citation for a Day-One answer or Navigator tool result."""
 
     file_path: str = Field(description="Relative path to source file")
     line_start: int = Field(default=0, ge=0)
@@ -217,6 +218,10 @@ class EvidenceEntry(BaseModel):
     evidence_type: EvidenceType = Field(
         default="static_analysis",
         description="Provenance: static_analysis | semantic_inference | lineage_graph | git_history",
+    )
+    confidence: Optional[EvidenceConfidence] = Field(
+        default=None,
+        description="Navigator-only: high | medium | low from tool heuristics",
     )
 
 
