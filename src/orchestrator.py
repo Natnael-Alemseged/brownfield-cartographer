@@ -182,6 +182,15 @@ def run_analysis(
     except Exception as e:
         logger.exception("Orchestrator: Hydrologist failed (partial results may exist): %s", e)
 
+    # Render dependency and lineage graphs to PNG for the scanned repo
+    try:
+        from src.graph.render_graph import render_all_graphs
+        rendered = render_all_graphs(out)
+        if rendered:
+            logger.info("Orchestrator: rendered graph images: %s", rendered)
+    except Exception as e:
+        logger.debug("Orchestrator: graph image render skipped: %s", e)
+
     return module_graph_path, lineage_graph_path, lineage_summary_path
 
 
