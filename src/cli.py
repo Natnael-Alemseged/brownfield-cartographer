@@ -4,24 +4,28 @@ CLI entry point for Brownfield Cartographer.
 Commands (subset modes):
   survey   — structure-only: module graph, PageRank, git velocity, dead-code (writes module_graph.json, survey_summary.md)
   lineage  — lineage-only: data lineage from SQL/Python/dbt/notebooks (writes lineage_graph.json, lineage_summary.md)
+  semantic — LLM purpose extraction, domain clustering, Day-One brief (requires survey + optional lineage outputs)
   analyze  — full pipeline: survey then lineage (all artifacts)
+  full     — full pipeline including Semanticist: survey -> lineage -> semantic
 """
 
 import argparse
 import logging
+import os
 import re
 import sys
 from pathlib import Path
 
 # Ensure project root is on path when running as main.py
 if __name__ == "__main__":
-    _root = Path(__file__).resolve().parent
+    _root = Path(__file__).resolve().parent.parent
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
 
 from src.agents.hydrologist import Hydrologist
+from src.agents.semanticist import Semanticist
 from src.agents.surveyor import Surveyor
-from src.orchestrator import run_analysis
+from src.orchestrator import run_analysis, run_full_pipeline
 from src.tools.repo_tools import RepoSandbox, is_safe_url
 
 GIT_URL_PATTERN = re.compile(r"^(https?://|git@)")
@@ -127,6 +131,34 @@ def cmd_lineage(input_path: str, output_dir: Path | None = None, verbose: bool =
     return 0
 
 
+def cmd_semantic(input_path: str, output_dir: Path | None = None, verbose: bool = False) -> int:
+    """
+    Run Semanticist on existing .cartography: purpose statements, domain clustering, Day-One brief.
+    Expects module_graph.json (run survey first). Optionally uses lineage_graph.json and summaries.
+    """
+    _configure_survey_logging(verbose=verbose)
+    output_dir = output_dir or Path.cwd() / ".cartography"
+    if _is_git_url(input_path):
+        print("Error: semantic command expects a local repo path (run survey/analyze on clone first).", file=sys.stderr)
+        return 1
+    path = Path(input_path.strip()).resolve()
+    if not path.exists() or not path.is_dir():
+        print(f"Error: path does not exist or is not a directory: {path}", file=sys.stderr)
+        return 1
+    if not (output_dir / "module_graph.json").exists():
+        print("Error: module_graph.json not found. Run 'survey' or 'analyze' first.", file=sys.stderr)
+        return 1
+    try:
+        semanticist = Semanticist(output_dir=output_dir, repo_path=str(path))
+        print(f"[CLI] Running Semanticist at {path} (output: {output_dir})")
+        mg, day_one_json, onboarding_md = semanticist.analyze_repository(str(path), output_dir=output_dir)
+        print(f"[CLI] Semanticist complete. Outputs: {mg}, {day_one_json}, {onboarding_md}")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_analyze(input_path: str, output_dir: Path | None = None, verbose: bool = False) -> int:
     """
     Run full pipeline: Surveyor then Hydrologist (all artifacts).
@@ -165,13 +197,50 @@ def cmd_analyze(input_path: str, output_dir: Path | None = None, verbose: bool =
     return 0
 
 
+def cmd_full(input_path: str, output_dir: Path | None = None, verbose: bool = False) -> int:
+    """Run full pipeline: Surveyor -> Hydrologist -> Semanticist (all artifacts including Day-One brief)."""
+    _configure_survey_logging(verbose=verbose)
+    output_dir = output_dir or Path.cwd() / ".cartography"
+    if _is_git_url(input_path):
+        url = input_path.strip()
+        if not is_safe_url(url):
+            print("Error: URL not allowed (only https/git GitHub URLs).", file=sys.stderr)
+            return 1
+        try:
+            print("[CLI] Cloning repository ...")
+            with RepoSandbox(url) as temp_path:
+                print(f"[CLI] Clone complete. Running full pipeline (survey -> lineage -> semantic) at {temp_path}")
+                mg, lg, ls, day_one_json, onboarding_md = run_full_pipeline(temp_path, output_dir=output_dir)
+                print(f"[CLI] Full pipeline complete. Outputs: {mg}, {lg}, {ls}, {day_one_json}, {onboarding_md}")
+        except (ValueError, RuntimeError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+    else:
+        path = Path(input_path.strip()).resolve()
+        if not path.exists() or not path.is_dir():
+            print(f"Error: path does not exist: {path}", file=sys.stderr)
+            return 1
+        try:
+            print(f"[CLI] Running full pipeline at {path}")
+            mg, lg, ls, day_one_json, onboarding_md = run_full_pipeline(str(path), output_dir=output_dir)
+            print(f"[CLI] Full pipeline complete. Outputs: {mg}, {lg}, {ls}, {day_one_json}, {onboarding_md}")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+    return 0
+
+
 def main() -> int:
-    """Dispatch subcommands. Supports structure-only (survey), lineage-only (lineage), or full (analyze)."""
+    """Dispatch subcommands: survey, lineage, semantic, analyze, full."""
     parser = argparse.ArgumentParser(
         description="Brownfield Cartographer: codebase and data lineage analysis.",
-        epilog="Modes: survey=structure-only, lineage=lineage-only, analyze=full pipeline.",
+        epilog="Modes: survey, lineage, semantic, analyze (survey+lineage), full (survey+lineage+semantic).",
     )
-    parser.add_argument("command", choices=["survey", "lineage", "analyze"], help="survey | lineage | analyze")
+    parser.add_argument(
+        "command",
+        choices=["survey", "lineage", "semantic", "analyze", "full"],
+        help="survey | lineage | semantic | analyze | full",
+    )
     parser.add_argument("input", help="Local directory or GitHub repo URL")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Output directory (default: .cartography)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Per-file / verbose logging")
@@ -182,8 +251,12 @@ def main() -> int:
         return cmd_survey(args.input, output_dir=output_dir, verbose=args.verbose)
     if args.command == "lineage":
         return cmd_lineage(args.input, output_dir=output_dir, verbose=args.verbose)
+    if args.command == "semantic":
+        return cmd_semantic(args.input, output_dir=output_dir, verbose=args.verbose)
     if args.command == "analyze":
         return cmd_analyze(args.input, output_dir=output_dir, verbose=args.verbose)
+    if args.command == "full":
+        return cmd_full(args.input, output_dir=output_dir, verbose=args.verbose)
     return 2
 
 

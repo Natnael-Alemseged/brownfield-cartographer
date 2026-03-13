@@ -1,1 +1,1 @@
-# Intelligent analysis agents (Surveyor, Hydrologist)
+# Intelligent analysis agents (Surveyor, Hydrologist, Semanticist)
